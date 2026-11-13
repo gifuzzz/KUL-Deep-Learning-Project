@@ -122,7 +122,8 @@ class RewardShaper:
             shaping += self.pickup_reward * len(first_pickups)
 
         # Frontier exploration reward (+0.05/cell, capped at +3.0/episode)
-        if newly_uncovered_cells > 0 and self.total_exploration_reward < self.max_exploration_reward:
+        is_carrying = any(v["carried_by"] == 0 for v in victims)
+        if not is_carrying and newly_uncovered_cells > 0 and self.total_exploration_reward < self.max_exploration_reward:
             bonus = newly_uncovered_cells * self.exploration_bonus
             remaining = self.max_exploration_reward - self.total_exploration_reward
             actual_bonus = min(bonus, remaining)

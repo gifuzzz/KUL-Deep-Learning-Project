@@ -28,6 +28,7 @@ import torch
 from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from agents.cnn import RecurrentSpatialRescueCNN
 from agents.recurrent_ppo import MaskableRecurrentPPO
@@ -165,22 +166,27 @@ class CurriculumRescueEnv(RescueEnv):
       - 70% hidden multi-room victims (max_steps=384, victim_distance=None, min_victim_distance=1)
     """
 
-    def __init__(self, stage: int = 1, **kwargs):
+    def __init__(self, stage: int = 1, near_ratio: float = 0.70, **kwargs):
         super().__init__(**kwargs)
         self.stage = int(stage)
+        self.near_ratio = float(near_ratio)
 
-    def set_stage(self, stage: int) -> None:
+    def set_stage(self, stage: int, near_ratio: float | None = None) -> None:
         self.stage = int(stage)
+        if near_ratio is not None:
+            self.near_ratio = float(near_ratio)
 
     def reset(self, *, seed=None, options=None):
         if options and "stage" in options:
             self.stage = int(options["stage"])
+        if options and "near_ratio" in options:
+            self.near_ratio = float(options["near_ratio"])
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
 
         if self.stage == 1:
-            if roll < 0.70:
+            if roll < self.near_ratio:
                 self.victim_distance = 2
                 self.min_victim_distance = 1
                 self.max_steps = 64
@@ -201,21 +207,67 @@ class CurriculumRescueEnv(RescueEnv):
         return super().reset(seed=seed, options=options)
 
 
+def set_env_stage(env: Any, stage: int, near_ratio: float | None = None) -> None:
+    """Set curriculum stage and optional near victim ratio across single or vectorized environments."""
+    if hasattr(env, "env_method"):
+        env.env_method("set_stage", stage, near_ratio)
+    elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "set_stage"):
+        env.unwrapped.set_stage(stage, near_ratio)
+
+
+def make_single_train_env(
+    stage: int = 1,
+    reward_shaping: bool = True,
+    navigation_shaping: bool = False,
+    near_ratio: float = 0.70,
+    seed: int | None = None,
+):
+    """Factory creating an individual monitored environment."""
+    def _init():
+        env = CurriculumRescueEnv(
+            stage=stage,
+            reward_shaping=reward_shaping,
+            navigation_shaping=navigation_shaping,
+            near_ratio=near_ratio,
+        )
+        env = PreviousActionWrapper(env)
+        if seed is not None:
+            env.reset(seed=seed)
+        return Monitor(env, info_keywords=("success", "timeout"))
+
+    return _init
+
+
 def make_train_env(
     stage: int = 1,
     reward_shaping: bool = True,
     navigation_shaping: bool = False,
-) -> Monitor:
-    env = CurriculumRescueEnv(
-        stage=stage,
-        reward_shaping=reward_shaping,
-        navigation_shaping=navigation_shaping,
-    )
-    env = PreviousActionWrapper(env)
-    return Monitor(
-        env,
-        info_keywords=("success", "timeout"),
-    )
+    near_ratio: float = 0.70,
+    n_envs: int = 8,
+    base_seed: int = 42,
+) -> DummyVecEnv | Monitor:
+    """Create vectorized or single monitored training environment."""
+    if n_envs <= 1:
+        env = CurriculumRescueEnv(
+            stage=stage,
+            reward_shaping=reward_shaping,
+            navigation_shaping=navigation_shaping,
+            near_ratio=near_ratio,
+        )
+        env = PreviousActionWrapper(env)
+        return Monitor(env, info_keywords=("success", "timeout"))
+
+    env_fns = [
+        make_single_train_env(
+            stage=stage,
+            reward_shaping=reward_shaping,
+            navigation_shaping=navigation_shaping,
+            near_ratio=near_ratio,
+            seed=base_seed + i * 1000,
+        )
+        for i in range(n_envs)
+    ]
+    return DummyVecEnv(env_fns)
 
 
 def make_eval_env(
@@ -410,7 +462,24 @@ def parse_args():
         default=None,
         help="Direct path to save the final model zip (e.g. ./models/autonomous_rl_v1/smoke_model.zip)",
     )
-    parser.add_argument("--checkpoint", type=str, default=None, help="Initial checkpoint path to load")
+    parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=8,
+        help="Number of parallel vectorized environments (default: 8)",
+    )
+    parser.add_argument(
+        "--near-ratio",
+        type=float,
+        default=0.70,
+        help="Stage 1 mixed near victim ratio (default: 0.70)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Initial checkpoint path to load",
+    )
     parser.add_argument(
         "--skip-qualification-gate",
         action="store_true",
@@ -449,6 +518,8 @@ def main():
         "n_epochs": args.n_epochs,
         "gamma": args.gamma,
         "ent_coef": args.ent_coef,
+        "n_envs": args.n_envs,
+        "near_ratio": args.near_ratio,
         "seed": args.seed,
         "device": device,
     }
@@ -472,7 +543,13 @@ def main():
             stage2_steps = args.stage2_timesteps
 
     initial_stage = 2 if args.stage == "2" else 1
-    train_env = make_train_env(stage=initial_stage, reward_shaping=True)
+    train_env = make_train_env(
+        stage=initial_stage,
+        reward_shaping=True,
+        near_ratio=args.near_ratio,
+        n_envs=args.n_envs,
+        base_seed=args.seed,
+    )
     eval_env = make_eval_env(victim_distance=2, max_steps=64)
 
     if args.checkpoint:
@@ -497,8 +574,7 @@ def main():
     try:
         # ---------------- STAGE 1 ----------------
         if stage1_steps > 0:
-            print(f"\n>>> Starting Stage 1: Qualification Gate ({stage1_steps} steps)")
-            train_env.unwrapped.set_stage(1)
+            print(f"\n>>> Starting Stage 1: Qualification Gate ({stage1_steps} steps, {args.n_envs} envs)")
             stage1_dir = save_dir / "stage1"
             stage1_dir.mkdir(parents=True, exist_ok=True)
 
@@ -510,8 +586,26 @@ def main():
                 deterministic=True,
             )
 
+            # Two-phase Stage 1 curriculum:
+            # Phase 1A: near-rescue mastery (100% near victims) to solidify the pickup-and-exit loop
+            # Phase 1B: mixed visibility curriculum (70% near, 30% medium)
+            phase1a_steps = min(80_000, int(stage1_steps * 0.35))
+            phase1b_steps = stage1_steps - phase1a_steps
+
+            if phase1a_steps > 0:
+                print(f"--- Stage 1A: Near-Rescue Mastery ({phase1a_steps} steps, 100% near victims) ---")
+                set_env_stage(train_env, stage=1, near_ratio=1.0)
+                model.learn(
+                    total_timesteps=phase1a_steps,
+                    callback=callback1,
+                    tb_log_name="PPO_Curriculum_Stage1",
+                    reset_num_timesteps=False,
+                )
+
+            print(f"--- Stage 1B: Mixed Near/Medium Curriculum ({phase1b_steps} steps, {int(args.near_ratio*100)}% near / {int((1-args.near_ratio)*100)}% medium) ---")
+            set_env_stage(train_env, stage=1, near_ratio=args.near_ratio)
             model.learn(
-                total_timesteps=stage1_steps,
+                total_timesteps=phase1b_steps,
                 callback=callback1,
                 tb_log_name="PPO_Curriculum_Stage1",
                 reset_num_timesteps=False,
@@ -528,6 +622,16 @@ def main():
             # Check Qualification Gate
             if not args.skip_qualification_gate:
                 passed = check_stage1_qualification(model, n_episodes=args.n_eval_episodes)
+                best_model_path = stage1_dir / "best_model.zip"
+                if not passed and best_model_path.exists():
+                    print(f"Checking if best checkpoint ({best_model_path}) passes qualification...")
+                    best_model = load_checkpoint(best_model_path, env=eval_env, device=device)
+                    best_passed = check_stage1_qualification(best_model, n_episodes=args.n_eval_episodes)
+                    if best_passed:
+                        print(f"Best checkpoint qualified! Using {best_model_path} as Stage 1 final model.")
+                        model = best_model
+                        passed = True
+
                 if not passed and args.stage == "all":
                     raise RuntimeError(
                         "Stage 1 Qualification Gate FAILED: Required >= 90% deterministic and "
@@ -538,8 +642,8 @@ def main():
 
         # ---------------- STAGE 2 ----------------
         if stage2_steps > 0:
-            print(f"\n>>> Starting Stage 2: Distant Search ({stage2_steps} steps)")
-            train_env.unwrapped.set_stage(2)
+            print(f"\n>>> Starting Stage 2: Distant Search ({stage2_steps} steps, {args.n_envs} envs)")
+            set_env_stage(train_env, stage=2)
             stage2_dir = save_dir / "stage2"
             stage2_dir.mkdir(parents=True, exist_ok=True)
 
