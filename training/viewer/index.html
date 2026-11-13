@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Rescue environment · Inspector</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header class="header">
+  <div class="identity"><span class="identity-mark" aria-hidden="true">✳</span><div><h1>Rescue environment</h1><p>Observation & action inspector</p></div></div>
+  <div class="session"><span id="status-dot" class="status-dot"></span><span id="episode-status">Connecting</span><span class="divider"></span><span id="step-count">Step 0</span></div>
+</header>
+<main>
+  <section class="toolbar" aria-label="Episode controls">
+    <label>Scenario seed<input id="seed" type="number" min="0" max="2147483647" value="42"></label>
+    <button id="reset">Reset episode</button>
+    <label class="model-select">Checkpoint<select id="checkpoint"><option value="">Manual exploration</option></select></label>
+    <button id="load">Load / reload</button>
+    <label>Policy<select id="mode"><option value="greedy">Highest probability</option><option value="sampled">Sampled</option></select></label>
+    <button id="step" class="primary">Step policy <kbd>Space</kbd></button>
+    <button id="play" class="play">▶ Play</button>
+    <label class="speed-label">Speed<select id="speed"><option value="1">1 step/s</option><option value="4" selected>4 steps/s</option><option value="10">10 steps/s</option></select></label>
+  </section>
+  <div id="error" class="error" role="alert" hidden></div>
+  <div class="model-note"><span id="model-note">Load a checkpoint to inspect policy probabilities, features, and value estimates.</span><label><input id="shaping" type="checkbox" checked> Training rewards <span class="hint">applied on reset</span></label></div>
+
+  <div class="overview">
+    <section class="panel world-panel">
+      <div class="panel-heading"><div><h2>Simulation</h2><p>Global state · includes cells hidden from the agent</p></div><select id="world-view" aria-label="Simulation viewport"><option value="follow">Follow firefighter</option><option value="building">Whole building</option></select></div>
+      <canvas id="world" width="650" height="400" aria-label="Simulation with physical walls, exit openings, firefighter and victim"></canvas>
+      <div class="world-footer"><div class="legend"><span><i class="key firefighter"></i>Firefighter</span><span><i class="key victim"></i>Victim</span><span><i class="key exit"></i>Exit</span></div><span id="world-position">—</span></div>
+    </section>
+    <section class="panel local-panel">
+      <div class="panel-heading"><div><h2 id="layer-title">Victims</h2><p id="layer-description">The local grid received by the agent</p></div><span id="shape" class="shape">11 × 15 × 15</span></div>
+      <div class="local-controls"><select id="source" aria-label="Observation source"><option value="policy">Policy inputs</option><option value="native">All simulator channels</option></select><select id="phase" aria-label="Before or after action"><option value="after">After action</option><option value="before">Before action</option></select></div>
+      <div class="local-canvas-wrap"><canvas id="local" width="360" height="360" tabindex="0" aria-label="Selected observation channel; click a cell for exact values"></canvas></div>
+      <div class="local-footer"><span id="layer-range">Range 0–1</span><label><input id="cell-values" type="checkbox"> Values</label></div>
+      <p class="canvas-hint">Crosshair = firefighter. Checkerboard = unseen; raw values remain zero.</p>
+    </section>
+    <section class="panel decision-panel">
+      <div class="panel-heading"><div><h2 id="decision-title">Next decision</h2><p>Solid = masked probability · line = unmasked</p></div></div>
+      <div id="action-bars" class="action-bars"></div>
+      <div class="value-line"><span>Critic V(s)<small id="value-note">Expected discounted training reward</small></span><strong id="value">—</strong></div>
+      <div class="manual-heading"><h3>Try an action</h3><label><input id="allow-invalid" type="checkbox"> Test masked actions</label></div>
+      <div id="manual-actions" class="manual-actions"></div>
+      <p class="canvas-hint">Arrow keys move · P picks up/drops · R rescues · W waits</p>
+    </section>
+  </div>
+
+  <section class="panel layers-panel">
+    <div class="panel-heading"><div><h2>Observation layers</h2><p id="layers-caption">Select a channel to inspect its values. These are actual simulator tensors.</p></div><span id="phase-note" class="subtle">After action</span></div>
+    <div id="layers" class="layers"></div>
+  </section>
+
+  <div class="details-grid">
+    <section class="panel cell-panel">
+      <div class="panel-heading"><div><h2>Cell inspector</h2><p id="cell-position">Select a cell in the local grid</p></div></div>
+      <div class="table-scroll"><table><thead><tr><th>Channel</th><th>Before</th><th>After</th><th>Δ</th></tr></thead><tbody id="cell-values-table"></tbody></table></div>
+      <p class="footnote">Compared at the same local index. Moving shifts the grid, so a difference can refer to a different world cell.</p>
+    </section>
+    <section class="panel features-panel">
+      <div class="panel-heading"><div><h2>Firefighter inputs</h2><p>The numerical features concatenated with CNN features</p></div></div>
+      <table><thead><tr><th>Feature</th><th>Before</th><th>After</th></tr></thead><tbody id="features"></tbody></table>
+      <details id="feature-details"><summary>Combined feature vector <span id="feature-count">128 features</span></summary><div id="feature-vector" class="feature-vector"></div><p class="footnote">Feature extractor output, combining the grid and firefighter inputs before the actor and critic. Color shows sign and magnitude; hover for an exact value.</p></details>
+    </section>
+    <section class="panel result-panel">
+      <div class="panel-heading"><div><h2>Action result</h2><p id="result-caption">Take an action to inspect the transition</p></div></div>
+      <div id="result" class="result-content"><p class="empty">Every action records its input, chosen command, native simulator result, and Gymnasium output.</p></div>
+    </section>
+  </div>
+
+  <section class="panel history-panel">
+    <div class="panel-heading"><div><h2>Episode history</h2><p>Review any recorded step without advancing the simulation</p></div><div class="history-buttons"><button id="live">Return to latest</button><button id="export">Export JSON</button></div></div>
+    <div class="timeline"><button id="back" aria-label="Previous recorded step">←</button><input id="seek" type="range" min="0" max="0" value="0" aria-label="Recorded step"><button id="forward" aria-label="Next recorded step">→</button><output id="seek-label">Step 0</output></div>
+    <div class="table-scroll history-scroll"><table><thead><tr><th>Step</th><th>Action</th><th>Selection</th><th>Native result</th><th>Reward</th><th>Total</th><th>Episode</th></tr></thead><tbody id="history"></tbody></table></div>
+  </section>
+  <details id="raw-details" class="panel raw-panel"><summary>Complete action exchange <span>Input tensors, masks, logits, probabilities, features, rewards, simulator output, and next observation</span></summary><pre id="raw"></pre></details>
+  <footer>Runs a separate inspection episode. Checkpoint weights are not updated. The training process is untouched.</footer>
+</main>
+</body>
+</html>
