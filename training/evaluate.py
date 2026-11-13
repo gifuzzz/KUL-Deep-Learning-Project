@@ -10,41 +10,57 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Add project root to sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
 from sb3_contrib import MaskablePPO
 
 from agents.cnn import RecurrentSpatialRescueCNN
+from agents.recurrent_ppo import MaskableRecurrentPPO
 from rescue_env.envs.single_agent import RescueEnv
+from rescue_env.wrappers import PreviousActionWrapper
 
 
 def load_model(
     model_path: str | Path,
-    env: RescueEnv | None = None,
+    env: RescueEnv | PreviousActionWrapper | None = None,
     device: str | torch.device = "auto",
-) -> tuple[MaskablePPO, torch.device]:
+) -> tuple[MaskableRecurrentPPO | MaskablePPO, torch.device]:
     """Load model checkpoint safely mapping tensors to the target device."""
     if device == "auto":
-        target_device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        if torch.cuda.is_available():
+            target_device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            target_device = torch.device("mps")
+        else:
+            target_device = torch.device("cpu")
     else:
         target_device = torch.device(device)
 
     custom_objects = {"policy_class": RecurrentSpatialRescueCNN}
-    try:
-        model = MaskablePPO.load(
-            str(model_path),
-            env=env,
-            device=target_device,
-            custom_objects=custom_objects,
-        )
-    except Exception:
-        model = MaskablePPO.load(
-            str(model_path),
-            env=env,
-            device=target_device,
-        )
+    model = None
+    for cls in (MaskableRecurrentPPO, MaskablePPO):
+        try:
+            model = cls.load(
+                str(model_path),
+                env=env,
+                device=target_device,
+                custom_objects=custom_objects,
+            )
+            break
+        except Exception:
+            continue
+
+    if model is None:
+        try:
+            model = MaskableRecurrentPPO.load(str(model_path), env=env, device=target_device)
+        except Exception:
+            model = MaskablePPO.load(str(model_path), env=env, device=target_device)
 
     if hasattr(model, "policy") and model.policy is not None:
         model.policy.to(target_device)
@@ -125,9 +141,9 @@ def main():
     )
     parser.add_argument(
         "--device",
-        choices=("cpu", "mps", "auto"),
+        choices=("cpu", "mps", "cuda", "auto"),
         default="auto",
-        help="Inference device (auto, cpu, mps)",
+        help="Inference device (auto, cpu, mps, cuda)",
     )
     parser.add_argument(
         "--output-json",
@@ -166,7 +182,7 @@ def main():
 
     # Strictly unshaped evaluation environment:
     # reward_shaping=False, navigation_shaping=False (+10 native rescue only)
-    env = RescueEnv(
+    raw_env = RescueEnv(
         max_steps=args.max_steps,
         victim_distance=victim_dist,
         min_victim_distance=args.min_victim_distance,
@@ -174,6 +190,7 @@ def main():
         navigation_shaping=False,
         memory_agent_marker=args.memory_agent_marker,
     )
+    env = PreviousActionWrapper(raw_env)
 
     model = None
     target_device = torch.device("cpu")

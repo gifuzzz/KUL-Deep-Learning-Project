@@ -8,7 +8,10 @@ from gymnasium import spaces
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.type_aliases import PyTorchObs, Schedule
+from stable_baselines3.common.policies import ActorCriticPolicy
 from sb3_contrib.ppo_mask.policies import MaskableActorCriticPolicy
+from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
+from sb3_contrib.common.recurrent.buffers import RNNStates
 from sb3_contrib.common.maskable.distributions import (
     MaskableDistribution,
     make_masked_proba_distribution,
@@ -164,15 +167,16 @@ class _DummyFeaturesExtractor(BaseFeaturesExtractor):
         return observations
 
 
-class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
-    """Recurrent Spatial Rescue CNN Policy compatible with SB3-contrib MaskablePPO.
+class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
+    """Recurrent Spatial Rescue CNN Policy with explicit recurrent state propagation and BPTT.
 
     Architecture:
       - Local Branch: Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 64, 3, pad=1) -> ReLU -> Conv2d(64, 8, 1) -> Flatten (1,800)
       - Memory Branch (Zero MaxPool2d): Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 32, 3, stride=2, pad=1) -> ReLU -> Conv2d(32, 16, 1) -> Flatten (8,320)
       - Agent Scalars: 5 features
       - Previous Action: 7-dim one-hot vector
-      - Fusion: Linear(10,132, 128) -> GRU(128, 128)
+      - Fusion: Linear(10,132, 128)
+      - Recurrence: GRU(128, 128)
       - Output Heads: Separate 7-action masked policy head and scalar value head.
     """
 
@@ -184,6 +188,11 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         net_arch: list[int] | dict[str, list[int]] | None = None,
         activation_fn: type[nn.Module] = nn.ReLU,
         ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        use_expln: bool = False,
+        squash_output: bool = False,
         features_extractor_class: type[BaseFeaturesExtractor] | None = None,
         features_extractor_kwargs: dict[str, Any] | None = None,
         share_features_extractor: bool = True,
@@ -191,6 +200,11 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         optimizer_class: type[torch.optim.Optimizer] = torch.optim.Adam,
         optimizer_kwargs: dict[str, Any] | None = None,
         hidden_size: int = 128,
+        lstm_hidden_size: int | None = None,
+        n_lstm_layers: int = 1,
+        shared_lstm: bool = False,
+        enable_critic_lstm: bool = False,
+        lstm_kwargs: dict[str, Any] | None = None,
     ):
         if action_space is None:
             action_space = spaces.Discrete(7)
@@ -205,15 +219,22 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
                 )
             observation_space = spaces.Dict(space_dict)
 
-        self.hidden_size = hidden_size
+        self.hidden_size = lstm_hidden_size or hidden_size
+        self.lstm_output_dim = self.hidden_size
 
-        super().__init__(
+        ActorCriticPolicy.__init__(
+            self,
             observation_space=observation_space,
             action_space=action_space,
             lr_schedule=lr_schedule,
             net_arch=net_arch,
             activation_fn=activation_fn,
             ortho_init=ortho_init,
+            use_sde=use_sde,
+            log_std_init=log_std_init,
+            full_std=full_std,
+            use_expln=use_expln,
+            squash_output=squash_output,
             features_extractor_class=features_extractor_class or _DummyFeaturesExtractor,
             features_extractor_kwargs=features_extractor_kwargs,
             share_features_extractor=share_features_extractor,
@@ -287,14 +308,21 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
             hidden_size=self.hidden_size,
             batch_first=True,
         )
+        # Expose attributes for RecurrentPPO compatibility:
+        self.lstm_actor = self.gru
+        self.lstm_critic = None
+        self.shared_lstm = True
+        self.enable_critic_lstm = False
+        self.lstm_hidden_state_shape = (1, 1, self.hidden_size)
+
+        # Masked action distribution
+        self.action_dist = make_masked_proba_distribution(self.action_space)
 
         # Output heads
         self.action_net = nn.Linear(self.hidden_size, self.action_dim)
         self.policy_head = self.action_net
         self.value_net = nn.Linear(self.hidden_size, 1)
         self.value_head = self.value_net
-
-        self.hidden_state = None
 
         if self.ortho_init:
             module_gains = {
@@ -344,10 +372,41 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         one_hot = one_hot * valid.unsqueeze(-1).float()
         return one_hot
 
+    def _unpack_hidden_state(
+        self,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None,
+        n_seq: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if lstm_states is None:
+            return torch.zeros((1, n_seq, self.hidden_size), dtype=torch.float32, device=device)
+        if isinstance(lstm_states, RNNStates):
+            h = lstm_states.pi[0]
+        elif isinstance(lstm_states, (tuple, list)):
+            h = lstm_states[0]
+        elif isinstance(lstm_states, torch.Tensor):
+            h = lstm_states
+        else:
+            raise TypeError(f"Unexpected lstm_states type: {type(lstm_states)}")
+
+        if h.dim() == 2:
+            h = h.unsqueeze(0)
+        if h.shape[1] != n_seq or h.device != device:
+            # Shape adjustment if necessary
+            if h.shape[1] == n_seq:
+                h = h.to(device)
+            else:
+                h = torch.zeros((1, n_seq, self.hidden_size), dtype=torch.float32, device=device)
+        return h
+
+    def _pack_hidden_state(self, h: torch.Tensor) -> RNNStates:
+        zeros = torch.zeros_like(h)
+        return RNNStates(pi=(h, zeros), vf=(h, zeros))
+
     def _forward_network(
         self,
         obs: dict[str, torch.Tensor] | torch.Tensor,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | np.ndarray | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not isinstance(obs, dict):
@@ -372,19 +431,53 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         )
         fused = self.fusion(combined)
 
-        h = lstm_states if lstm_states is not None else self.hidden_state
-        if h is None or h.shape[1] != batch_size or h.device != device:
-            h = torch.zeros((1, batch_size, self.hidden_size), dtype=torch.float32, device=device)
+        # Determine sequence shape:
+        if lstm_states is not None:
+            raw_h = (
+                lstm_states.pi[0]
+                if isinstance(lstm_states, RNNStates)
+                else (lstm_states[0] if isinstance(lstm_states, (tuple, list)) else lstm_states)
+            )
+            if raw_h.dim() >= 2 and batch_size % raw_h.shape[1] == 0:
+                n_seq = raw_h.shape[1]
+            else:
+                n_seq = batch_size
+        else:
+            n_seq = batch_size
+
+        max_length = batch_size // n_seq
+        h = self._unpack_hidden_state(lstm_states, n_seq, device)
+        fused_sequence = fused.view(n_seq, max_length, self.hidden_size)
 
         if episode_starts is not None:
-            starts = torch.as_tensor(episode_starts, dtype=torch.float32, device=device).view(1, batch_size, 1)
-            h = h * (1.0 - starts)
+            starts = torch.as_tensor(episode_starts, dtype=torch.float32, device=device).view(n_seq, max_length)
+        else:
+            starts = torch.zeros((n_seq, max_length), dtype=torch.float32, device=device)
 
-        gru_out, next_hidden = self.gru(fused.unsqueeze(1), h)
-        gru_out = gru_out.squeeze(1)
+        if max_length == 1:
+            # Single-step transition (e.g. rollout collection or step-by-step inference)
+            h = (1.0 - starts[:, 0].view(1, n_seq, 1)) * h
+            gru_out, next_h = self.gru(fused_sequence, h)
+            gru_out = gru_out.view(batch_size, self.hidden_size)
+        else:
+            # Multi-step sequence unrolling with full BPTT gradient propagation
+            if torch.all(starts[:, 1:] == 0.0):
+                # Clean trajectory chunk: resets only at sequence start
+                h = (1.0 - starts[:, 0].view(1, n_seq, 1)) * h
+                gru_out, next_h = self.gru(fused_sequence, h)
+                gru_out = gru_out.contiguous().view(batch_size, self.hidden_size)
+            else:
+                # Trajectory contains mid-sequence resets: unroll step-by-step
+                gru_outputs = []
+                for t in range(max_length):
+                    step_reset = starts[:, t].view(1, n_seq, 1)
+                    h = (1.0 - step_reset) * h
+                    out_t, h = self.gru(fused_sequence[:, t : t + 1, :], h)
+                    gru_outputs.append(out_t)
+                gru_out = torch.cat(gru_outputs, dim=1).contiguous().view(batch_size, self.hidden_size)
+                next_h = h
 
-        self.hidden_state = next_hidden.detach()
-        return gru_out, next_hidden
+        return gru_out, next_h
 
     def reset_hidden_state(
         self,
@@ -393,14 +486,13 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
     ) -> torch.Tensor:
         if device is None:
             device = next(self.parameters()).device
-        self.hidden_state = torch.zeros((1, batch_size, self.hidden_size), dtype=torch.float32, device=device)
-        return self.hidden_state
+        return torch.zeros((1, batch_size, self.hidden_size), dtype=torch.float32, device=device)
 
     def get_masked_logits(
         self,
         obs: dict[str, torch.Tensor] | torch.Tensor,
         action_masks: torch.Tensor | np.ndarray | None = None,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
@@ -415,7 +507,7 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         self,
         obs: dict[str, torch.Tensor] | torch.Tensor,
         action_masks: torch.Tensor | np.ndarray | None = None,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
@@ -431,7 +523,7 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         self,
         obs: dict[str, torch.Tensor] | torch.Tensor,
         features_extractor: nn.Module | None = None,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
@@ -441,19 +533,19 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         self,
         obs: PyTorchObs,
         *args,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
+        episode_starts: torch.Tensor | np.ndarray | None = None,
         deterministic: bool = False,
         action_masks: np.ndarray | torch.Tensor | None = None,
-        lstm_states: torch.Tensor | None = None,
-        episode_starts: torch.Tensor | None = None,
         return_hidden_state: bool | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         if len(args) > 0:
             if isinstance(args[0], bool):
                 deterministic = args[0]
                 if len(args) > 1:
                     action_masks = args[1]
-            elif isinstance(args[0], (torch.Tensor, tuple)):
+            elif isinstance(args[0], (torch.Tensor, tuple, RNNStates)):
                 lstm_states = args[0]
                 if len(args) > 1:
                     episode_starts = args[1]
@@ -472,12 +564,8 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
             episode_starts = kwargs["dones"]
         if "lstm_states" in kwargs:
             lstm_states = kwargs["lstm_states"]
-        if "hidden_state" in kwargs:
-            lstm_states = kwargs["hidden_state"]
 
-        latent, next_hidden = self._forward_network(
-            obs, lstm_states=lstm_states, episode_starts=episode_starts
-        )
+        latent, next_h = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
         values = self.value_net(latent)
         logits = self.action_net(latent)
         distribution = self.action_dist.proba_distribution(action_logits=logits)
@@ -488,15 +576,17 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         actions = actions.reshape((-1, *self.action_space.shape))
 
         if return_hidden_state or (return_hidden_state is None and lstm_states is not None):
-            return actions, values, log_prob, next_hidden
+            if isinstance(lstm_states, torch.Tensor) and not isinstance(lstm_states, RNNStates):
+                return actions, values, log_prob, next_h
+            return actions, values, log_prob, self._pack_hidden_state(next_h)
         return actions, values, log_prob
 
     def get_distribution(
         self,
         obs: PyTorchObs,
-        action_masks: np.ndarray | torch.Tensor | None = None,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
+        action_masks: np.ndarray | torch.Tensor | None = None,
     ) -> MaskableDistribution:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
         logits = self.action_net(latent)
@@ -509,9 +599,9 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
         self,
         obs: PyTorchObs,
         actions: torch.Tensor,
-        action_masks: torch.Tensor | None = None,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
+        action_masks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
         values = self.value_net(latent)
@@ -525,7 +615,7 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
     def predict_values(
         self,
         obs: PyTorchObs,
-        lstm_states: torch.Tensor | None = None,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
         episode_starts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         latent, _ = self._forward_network(obs, lstm_states=lstm_states, episode_starts=episode_starts)
@@ -534,17 +624,25 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
     def _predict(
         self,
         observation: PyTorchObs,
+        lstm_states: RNNStates | tuple[torch.Tensor, ...] | torch.Tensor | None = None,
+        episode_starts: torch.Tensor | None = None,
         deterministic: bool = False,
-        action_masks: np.ndarray | None = None,
-    ) -> torch.Tensor:
-        return self.get_distribution(observation, action_masks=action_masks).get_actions(
-            deterministic=deterministic
+        action_masks: np.ndarray | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, RNNStates]:
+        distribution = self.get_distribution(
+            observation,
+            lstm_states=lstm_states,
+            episode_starts=episode_starts,
+            action_masks=action_masks,
         )
+        actions = distribution.get_actions(deterministic=deterministic)
+        _, next_h = self._forward_network(observation, lstm_states=lstm_states, episode_starts=episode_starts)
+        return actions, self._pack_hidden_state(next_h)
 
     def predict(
         self,
         observation: np.ndarray | dict[str, np.ndarray],
-        state: tuple[np.ndarray, ...] | torch.Tensor | np.ndarray | None = None,
+        state: tuple[np.ndarray, ...] | np.ndarray | None = None,
         episode_start: np.ndarray | None = None,
         deterministic: bool = False,
         action_masks: np.ndarray | None = None,
@@ -554,18 +652,24 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
 
         state_tensor = None
         if state is not None:
-            if isinstance(state, np.ndarray):
+            if isinstance(state, tuple):
+                state_tensor = torch.as_tensor(state[0], dtype=torch.float32, device=self.device)
+            elif isinstance(state, np.ndarray):
                 state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
             elif isinstance(state, torch.Tensor):
                 state_tensor = state.to(self.device)
 
+        episode_start_tensor = None
+        if episode_start is not None:
+            episode_start_tensor = torch.as_tensor(episode_start, dtype=torch.float32, device=self.device)
+
         with torch.no_grad():
-            actions, _, _, next_hidden = self.forward(
+            actions, _, _, next_lstm_states = self.forward(
                 obs_tensor,
                 lstm_states=state_tensor,
-                episode_starts=episode_start,
-                action_masks=action_masks,
+                episode_starts=episode_start_tensor,
                 deterministic=deterministic,
+                action_masks=action_masks,
                 return_hidden_state=True,
             )
 
@@ -575,8 +679,18 @@ class RecurrentSpatialRescueCNN(MaskableActorCriticPolicy):
             if actions_np.ndim == 0:
                 actions_np = int(actions_np)
 
-        next_state_np = next_hidden.cpu().numpy()
+        if isinstance(next_lstm_states, RNNStates):
+            next_state_np = next_lstm_states.pi[0].cpu().numpy()
+        elif isinstance(next_lstm_states, (tuple, list)):
+            next_state_np = next_lstm_states[0].cpu().numpy()
+        else:
+            next_state_np = next_lstm_states.cpu().numpy()
+
         return actions_np, next_state_np
+
+
+# Register with MaskableActorCriticPolicy for sb3_contrib isinstance checks
+MaskableActorCriticPolicy.register(RecurrentSpatialRescueCNN)
 
 
 class SpatialRescueFeaturesExtractor(BaseFeaturesExtractor):

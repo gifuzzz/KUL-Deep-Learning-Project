@@ -13,8 +13,15 @@ under the Mixed Visibility Curriculum:
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
+from typing import Any
+
+# Add project root to sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
@@ -23,18 +30,48 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 from agents.cnn import RecurrentSpatialRescueCNN
+from agents.recurrent_ppo import MaskableRecurrentPPO
 from rescue_env.envs.single_agent import RescueEnv
+from rescue_env.wrappers import PreviousActionWrapper
 
 
-def save_checkpoint(model: MaskablePPO, path: str | Path) -> None:
+def get_git_commit() -> str:
+    """Retrieve git commit hash or return unknown."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return commit
+    except Exception:
+        return "unknown"
+
+
+def save_checkpoint(
+    model: MaskableRecurrentPPO | MaskablePPO,
+    path: str | Path,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     """Save model checkpoint safely casting policy and optimizer state dicts to CPU.
 
-    This prevents device serialization mismatch (e.g. AssertionError: mps:0 != cpu)
-    when transferring between MPS and CPU runtimes.
+    Supports CPU/MPS/CUDA cross-device transfer and saves metadata (stage, timesteps,
+    git commit, hyperparameters) into the checkpoint zip and companion JSON file.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     orig_device = model.device
+
+    meta_dict = {
+        "git_commit": get_git_commit(),
+        "total_timesteps": getattr(model, "num_timesteps", 0),
+        "policy_class": model.policy.__class__.__name__,
+        "algorithm": model.__class__.__name__,
+    }
+    if metadata:
+        meta_dict.update(metadata)
+
     try:
         model.policy.to("cpu")
         if hasattr(model.policy, "optimizer") and model.policy.optimizer is not None:
@@ -43,6 +80,16 @@ def save_checkpoint(model: MaskablePPO, path: str | Path) -> None:
                     if isinstance(v, torch.Tensor):
                         state[k] = v.to("cpu")
         model.save(str(path))
+
+        # Append metadata.json inside the zip
+        with zipfile.ZipFile(str(path), mode="a") as zf:
+            zf.writestr("metadata.json", json.dumps(meta_dict, indent=2))
+
+        # Also write companion .meta.json file alongside
+        meta_path = path.with_suffix(".meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_dict, f, indent=2)
+
     finally:
         model.policy.to(orig_device)
         if hasattr(model.policy, "optimizer") and model.policy.optimizer is not None:
@@ -56,27 +103,37 @@ def load_checkpoint(
     path: str | Path,
     env=None,
     device: str | torch.device = "auto",
-) -> MaskablePPO:
-    """Load model checkpoint safely onto specified device (handling MPS/CPU compatibility)."""
+) -> MaskableRecurrentPPO | MaskablePPO:
+    """Load model checkpoint safely onto specified device (handling CUDA/MPS/CPU compatibility)."""
     if device == "auto":
-        target_device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        if torch.cuda.is_available():
+            target_device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            target_device = torch.device("mps")
+        else:
+            target_device = torch.device("cpu")
     else:
         target_device = torch.device(device)
 
     custom_objects = {"policy_class": RecurrentSpatialRescueCNN}
-    try:
-        model = MaskablePPO.load(
-            str(path),
-            env=env,
-            device=target_device,
-            custom_objects=custom_objects,
-        )
-    except Exception:
-        model = MaskablePPO.load(
-            str(path),
-            env=env,
-            device=target_device,
-        )
+    model = None
+    for cls in (MaskableRecurrentPPO, MaskablePPO):
+        try:
+            model = cls.load(
+                str(path),
+                env=env,
+                device=target_device,
+                custom_objects=custom_objects,
+            )
+            break
+        except Exception:
+            continue
+
+    if model is None:
+        try:
+            model = MaskableRecurrentPPO.load(str(path), env=env, device=target_device)
+        except Exception:
+            model = MaskablePPO.load(str(path), env=env, device=target_device)
 
     if hasattr(model, "policy") and model.policy is not None:
         model.policy.to(target_device)
@@ -85,6 +142,14 @@ def load_checkpoint(
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):
                         state[k] = v.to(target_device)
+
+    try:
+        with zipfile.ZipFile(str(path), mode="r") as zf:
+            if "metadata.json" in zf.namelist():
+                model.checkpoint_metadata = json.loads(zf.read("metadata.json"))
+    except Exception:
+        pass
+
     return model
 
 
@@ -141,12 +206,14 @@ def make_train_env(
     reward_shaping: bool = True,
     navigation_shaping: bool = False,
 ) -> Monitor:
+    env = CurriculumRescueEnv(
+        stage=stage,
+        reward_shaping=reward_shaping,
+        navigation_shaping=navigation_shaping,
+    )
+    env = PreviousActionWrapper(env)
     return Monitor(
-        CurriculumRescueEnv(
-            stage=stage,
-            reward_shaping=reward_shaping,
-            navigation_shaping=navigation_shaping,
-        ),
+        env,
         info_keywords=("success", "timeout"),
     )
 
@@ -155,20 +222,21 @@ def make_eval_env(
     victim_distance: int | None = 2,
     max_steps: int = 64,
     min_victim_distance: int = 1,
-) -> RescueEnv:
+) -> PreviousActionWrapper:
     """Unshaped evaluation environment (+10 native rescue only)."""
-    return RescueEnv(
+    env = RescueEnv(
         max_steps=max_steps,
         victim_distance=victim_distance,
         min_victim_distance=min_victim_distance,
         reward_shaping=False,
         navigation_shaping=False,
     )
+    return PreviousActionWrapper(env)
 
 
 def evaluate_unshaped(
-    model: MaskablePPO,
-    eval_env: RescueEnv,
+    model: MaskableRecurrentPPO | MaskablePPO,
+    eval_env: PreviousActionWrapper | RescueEnv,
     n_episodes: int = 20,
     deterministic: bool = True,
     seed_start: int = 20000,
@@ -322,7 +390,7 @@ def parse_args():
     )
     parser.add_argument(
         "--device",
-        choices=["auto", "cpu", "mps"],
+        choices=["auto", "cpu", "mps", "cuda"],
         default="auto",
         help="Device to train on (default: auto)",
     )
@@ -356,7 +424,12 @@ def main():
 
     # Determine device
     if args.device == "auto":
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
     else:
         device = args.device
     print(f"Device: {device}")
@@ -368,6 +441,17 @@ def main():
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    hyperparameters = {
+        "learning_rate": args.learning_rate,
+        "n_steps": args.n_steps,
+        "batch_size": args.batch_size,
+        "n_epochs": args.n_epochs,
+        "gamma": args.gamma,
+        "ent_coef": args.ent_coef,
+        "seed": args.seed,
+        "device": device,
+    }
 
     # Determine timesteps for stages
     if args.stage == "1":
@@ -395,7 +479,7 @@ def main():
         print(f"Loading checkpoint from: {args.checkpoint}")
         model = load_checkpoint(args.checkpoint, env=train_env, device=device)
     else:
-        model = MaskablePPO(
+        model = MaskableRecurrentPPO(
             policy=RecurrentSpatialRescueCNN,
             env=train_env,
             learning_rate=args.learning_rate,
@@ -434,7 +518,11 @@ def main():
             )
 
             stage1_final = stage1_dir / "stage1_final.zip"
-            save_checkpoint(model, stage1_final)
+            save_checkpoint(
+                model,
+                stage1_final,
+                metadata={"stage": 1, "hyperparameters": hyperparameters},
+            )
             print(f"Stage 1 completed. Model saved to {stage1_final}")
 
             # Check Qualification Gate
@@ -473,17 +561,35 @@ def main():
             eval_env_stage2.close()
 
             stage2_final = stage2_dir / "stage2_final.zip"
-            save_checkpoint(model, stage2_final)
+            save_checkpoint(
+                model,
+                stage2_final,
+                metadata={"stage": 2, "hyperparameters": hyperparameters},
+            )
             print(f"Stage 2 completed. Model saved to {stage2_final}")
 
         final_model_path = save_dir / "final_model.zip"
-        save_checkpoint(model, final_model_path)
+        save_checkpoint(
+            model,
+            final_model_path,
+            metadata={
+                "stage": 2 if stage2_steps > 0 else 1,
+                "hyperparameters": hyperparameters,
+            },
+        )
         print(f"Training complete. Final checkpoint saved to {final_model_path}")
 
         if args.save_model:
             smoke_path = Path(args.save_model)
             smoke_path.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(model, smoke_path)
+            save_checkpoint(
+                model,
+                smoke_path,
+                metadata={
+                    "stage": 2 if stage2_steps > 0 else 1,
+                    "hyperparameters": hyperparameters,
+                },
+            )
             print(f"Model saved to {smoke_path}")
 
     finally:
