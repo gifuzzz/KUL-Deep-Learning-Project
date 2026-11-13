@@ -4,11 +4,11 @@ import numpy as np
 class MemoryMap:
     def __init__(
         self,
-        height,
-        width,
-        channels=11,
-        max_height=64,
-        max_width=64,
+        height: int,
+        width: int,
+        channels: int = 9,
+        max_height: int = 40,
+        max_width: int = 52,
     ):
         if height > max_height or width > max_width:
             raise ValueError(
@@ -16,72 +16,87 @@ class MemoryMap:
                 f"memory capacity {max_height}x{max_width}"
             )
 
-        self.height = height
-        self.width = width
-        self.channels = channels
-        self.max_height = max_height
-        self.max_width = max_width
+        self.height = int(height)
+        self.width = int(width)
+        self.channels = int(channels)
+        self.max_height = int(max_height)
+        self.max_width = int(max_width)
+
+        self.pad_top = (self.max_height - self.height) // 2
+        self.pad_left = (self.max_width - self.width) // 2
 
         self.reset()
 
     def reset(self):
-        # Last observed values for each cell
+        # Channels 0..8 stored for the building footprint (height, width)
         self.grid = np.zeros(
             (self.channels, self.height, self.width),
-            dtype=np.float32
-        )
-
-        # 1 = previously observed, 0 = unknown
-        self.explored = np.zeros(
-            (self.height, self.width),
-            dtype=np.float32
-        )
-
-    def update(self, local_grid, agent_position):
-        agent_r, agent_c = agent_position
-
-        # Firefighter is in the center of the local grid
-        radius_r = local_grid.shape[1] // 2
-        radius_c = local_grid.shape[2] // 2
-
-        for r in range(local_grid.shape[1]):
-            for c in range(local_grid.shape[2]):
-
-                # Local coordinates -> global coordinates
-                global_r = agent_r + r - radius_r
-                global_c = agent_c + c - radius_c
-
-                # Ignore cells outside the building
-                if not (
-                    0 <= global_r < self.height
-                    and 0 <= global_c < self.width
-                ):
-                    continue
-
-                # Channel 2 is visibility in our current grid
-                if local_grid[2, r, c] <= 0:
-                    continue
-
-                # Store the latest observation
-                self.grid[:, global_r, global_c] = local_grid[:, r, c]
-
-                # Mark this cell as explored
-                self.explored[global_r, global_c] = 1.0
-
-    def get_observation(self):
-        # Store remembered information in a fixed-size array
-        padded = np.zeros(
-            (self.channels + 2, self.max_height, self.max_width),
             dtype=np.float32,
         )
 
-        # Copy memory channels into the top-left region
-        padded[:self.channels, :self.height, :self.width] = self.grid
+        # 1.0 = previously observed in line-of-sight, 0.0 = unknown
+        self.explored = np.zeros(
+            (self.height, self.width),
+            dtype=np.float32,
+        )
 
-        # Explored mask: 1 = observed
-        padded[self.channels, :self.height, :self.width] = self.explored
+        self.last_agent_position = None
 
-        # Building mask: 1 = actual building cell, 0 = padding
-        padded[self.channels + 1, :self.height, :self.width] = 1.0
+    def update(self, local_grid, agent_position):
+        self.last_agent_position = agent_position
+        agent_r, agent_c = agent_position
+
+        radius_r = local_grid.shape[1] // 2
+        radius_c = local_grid.shape[2] // 2
+
+        r_min_local = max(0, radius_r - agent_r)
+        r_max_local = min(local_grid.shape[1], radius_r + self.height - agent_r)
+        c_min_local = max(0, radius_c - agent_c)
+        c_max_local = min(local_grid.shape[2], radius_c + self.width - agent_c)
+
+        if r_min_local < r_max_local and c_min_local < c_max_local:
+            r_min_global = agent_r + r_min_local - radius_r
+            r_max_global = agent_r + r_max_local - radius_r
+            c_min_global = agent_c + c_min_local - radius_c
+            c_max_global = agent_c + c_max_local - radius_c
+
+            sub_local = local_grid[:, r_min_local:r_max_local, c_min_local:c_max_local]
+            vis_ch = 5 if local_grid.shape[0] == 9 else 2
+            vis_mask = sub_local[vis_ch] > 0
+
+            if np.any(vis_mask):
+                if local_grid.shape[0] == 9:
+                    for ch in (0, 1, 2, 3, 4, 6, 7):
+                        dest = self.grid[ch, r_min_global:r_max_global, c_min_global:c_max_global]
+                        dest[vis_mask] = sub_local[ch][vis_mask]
+
+                    self.explored[r_min_global:r_max_global, c_min_global:c_max_global][vis_mask] = 1.0
+                    self.grid[5, r_min_global:r_max_global, c_min_global:c_max_global][vis_mask] = 1.0
+                else:
+                    for ch in range(min(self.channels, local_grid.shape[0])):
+                        dest = self.grid[ch, r_min_global:r_max_global, c_min_global:c_max_global]
+                        dest[vis_mask] = sub_local[ch][vis_mask]
+                    self.explored[r_min_global:r_max_global, c_min_global:c_max_global][vis_mask] = 1.0
+
+    def get_observation(self, agent_position=None):
+        padded = np.zeros(
+            (self.channels, self.max_height, self.max_width),
+            dtype=np.float32,
+        )
+
+        pad_top = self.pad_top
+        pad_left = self.pad_left
+
+        num_copy = min(8, self.channels)
+        padded[:num_copy, pad_top : pad_top + self.height, pad_left : pad_left + self.width] = self.grid[:num_copy]
+
+        if self.channels > 5:
+            padded[5, pad_top : pad_top + self.height, pad_left : pad_left + self.width] = self.explored
+
+        pos = agent_position if agent_position is not None else self.last_agent_position
+        if pos is not None and self.channels > 8:
+            ar, ac = pos
+            if 0 <= ar < self.height and 0 <= ac < self.width:
+                padded[8, pad_top + ar, pad_left + ac] = 1.0
 
         return padded

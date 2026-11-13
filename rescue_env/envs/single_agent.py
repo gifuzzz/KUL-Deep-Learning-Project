@@ -5,13 +5,15 @@ from collections import deque
 
 from rescue_env.flamebox.flamebox import Environment
 from .memory_map import MemoryMap
-from .reward_shaping import state_potential, potential_reward
+from .reward_shaping import state_potential, potential_reward, RewardShaper
 
 class RescueEnv(gym.Env):
     """Gymnasium interface for one FlameBox firefighter."""
 
     ACTIONS = (0, 1, 2, 3, 4, 10, 5)
-    SELECTED_CHANNELS = (2, 4, 5, 6, 8, 9, 10, 11, 13, 14)
+    NUM_CHANNELS = 9
+    MEMORY_HEIGHT = 40
+    MEMORY_WIDTH = 52
 
     def __init__(self, max_steps=500, visibility_radius=7, victim_distance=3,
                  reward_shaping=False, fixed_seed=None, scenario_seeds=None,
@@ -25,6 +27,7 @@ class RescueEnv(gym.Env):
         self.reward_shaping = reward_shaping
         self.navigation_shaping = navigation_shaping
         self.memory_agent_marker = memory_agent_marker
+        self.reward_shaper = RewardShaper() if reward_shaping else None
         if not np.isfinite(exploration_bonus) or exploration_bonus < 0:
             raise ValueError("exploration_bonus must be finite and nonnegative")
         self.exploration_bonus = exploration_bonus
@@ -53,20 +56,22 @@ class RescueEnv(gym.Env):
         # Seven possible actions
         self.action_space = spaces.Discrete(len(self.ACTIONS))
 
-        # Local observation: selected channels, square grid
+        # Local observation: 9 channels, square grid
         side = 2 * visibility_radius + 1
+        self.max_height = self.MEMORY_HEIGHT
+        self.max_width = self.MEMORY_WIDTH
 
         self.observation_space = spaces.Dict({
             "grid": spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(len(self.SELECTED_CHANNELS) + 1, side, side),
+                shape=(self.NUM_CHANNELS, side, side),
                 dtype=np.float32,
             ),
             "memory": spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(14 if memory_agent_marker else 13, 64, 64),
+                shape=(self.NUM_CHANNELS, self.max_height, self.max_width),
                 dtype=np.float32,
             ),
             "agent": spaces.Box(
@@ -191,57 +196,70 @@ class RescueEnv(gym.Env):
         return mask
 
     def _get_observation(self):
-        """Retrieve firefighter 0's local observation."""
+        """Retrieve firefighter 0's clean 9-channel local and memory observation."""
 
         raw = self.sim.observe(
             agent_id=0,
             visibility_radius=self.visibility_radius,
         )
 
-        exits = np.zeros_like(raw["grid"][0])
-        grid = raw["grid"][list(self.SELECTED_CHANNELS)].astype(np.float32)
+        side = 2 * self.visibility_radius + 1
         person = self.sim.agents[0]
+
+        # 9 channels:
+        # Ch 0: Passability North (raw[8] >= 0.5)
+        # Ch 1: Passability East (raw[9] >= 0.5)
+        # Ch 2: Passability South (raw[10] >= 0.5)
+        # Ch 3: Passability West (raw[11] >= 0.5)
+        # Ch 4: Debris / Obstacle (raw[4] > 0)
+        # Ch 5: Explored Mask / Line-of-sight (raw[5] > 0)
+        # Ch 6: Victim (raw[6])
+        # Ch 7: Exit (1.0 if exit portal cell visible)
+        # Ch 8: Agent Position (1.0 at agent local center)
+        local_grid = np.zeros((self.NUM_CHANNELS, side, side), dtype=np.float32)
+        local_grid[0] = (raw["grid"][8] >= 0.5).astype(np.float32)
+        local_grid[1] = (raw["grid"][9] >= 0.5).astype(np.float32)
+        local_grid[2] = (raw["grid"][10] >= 0.5).astype(np.float32)
+        local_grid[3] = (raw["grid"][11] >= 0.5).astype(np.float32)
+        local_grid[4] = (raw["grid"][4] > 0.0).astype(np.float32)
+        local_grid[5] = (raw["grid"][5] > 0.0).astype(np.float32)
+        local_grid[6] = raw["grid"][6].astype(np.float32)
+        local_grid[8, self.visibility_radius, self.visibility_radius] = 1.0
+
         for opening in self.sim.openings:
             if opening["kind"] != "exit":
                 continue
             for row, col in self.sim._portal_cells(opening, opening["zone_a"]):
                 r = row - person["r"] + self.visibility_radius
                 c = col - person["c"] + self.visibility_radius
-                if (0 <= r < exits.shape[0] and 0 <= c < exits.shape[1]
-                        and raw["grid"][5, r, c] > 0):
-                    exits[r, c] = 1
+                if (0 <= r < side and 0 <= c < side and raw["grid"][5, r, c] > 0):
+                    local_grid[7, r, c] = 1.0
                     face = ((0 if opening["at"] == 0 else 2) if opening["orient"] == "H"
                             else (3 if opening["at"] == 0 else 1))
-                    grid[4 + face, r, c] = bool(
-                        opening["open"] and not opening.get("blocked") and not grid[1, r, c]
+                    is_passable = bool(
+                        opening["open"] and not opening.get("blocked") and not (local_grid[4, r, c] > 0)
                     )
+                    local_grid[face, r, c] = 1.0 if is_passable else 0.0
 
         carrying = any(
             v["carried_by"] == 0 and not v["dead"] and not v["rescued"]
             for v in self.sim.victims
         )
 
-        grid = np.concatenate((grid, exits[None]), axis=0)
-        self.victim_seen = self.victim_seen or bool((grid[3] > 0).any())
-        agent = np.append(raw["agent"], carrying).astype(np.float32)
-        
+        self.victim_seen = self.victim_seen or bool((local_grid[6] > 0).any())
+        agent = np.append(raw["agent"], float(carrying)).astype(np.float32)
 
         self.memory.update(
-            local_grid=grid,
+            local_grid=local_grid,
             agent_position=(person["r"], person["c"]),
         )
 
-        memory = self.memory.get_observation()
-        if self.memory_agent_marker:
-            marker = np.zeros((1, 64, 64), dtype=np.float32)
-            r, c = person["r"], person["c"]
-            # Grass positions stay outside the building map; agent coordinates remain available.
-            if 0 <= r < self.sim.h and 0 <= c < self.sim.w:
-                marker[0, r, c] = 1.0
-            memory = np.concatenate((memory, marker), axis=0)
+        memory = self.memory.get_observation(
+            agent_position=(person["r"], person["c"]),
+        )
 
         return {
-            "grid": grid,
+            "grid": local_grid,
             "memory": memory,
             "agent": agent,
         }
@@ -287,11 +305,15 @@ class RescueEnv(gym.Env):
         self.steps = 0
         self.rewarded_pickups = set()
         self.victim_seen = False
+        if self.reward_shaper is not None:
+            self.reward_shaper.reset()
 
         self.memory = MemoryMap(
             height=self.sim.h,
             width=self.sim.w,
-            channels=11,
+            channels=self.NUM_CHANNELS,
+            max_height=self.max_height,
+            max_width=self.max_width,
         )
 
         observation = self._get_observation()
@@ -311,7 +333,7 @@ class RescueEnv(gym.Env):
             raise ValueError(f"Invalid action: {action}")
 
         searching = not self.victim_seen
-        explored_before = self.memory.explored.sum() if self.exploration_bonus else 0
+        explored_before = self.memory.explored.sum()
 
         # Potential before executing the action.
         before = (
@@ -334,17 +356,17 @@ class RescueEnv(gym.Env):
         # Base rescue reward.
         reward = float(result["reward"])
 
+        # Update observation and remembered memory
+        observation = self._get_observation()
+        newly_uncovered = max(0, int(self.memory.explored.sum() - explored_before))
+
         if self.reward_shaping:
-            picked_up = {
-                v["id"]
-                for v in result["victims"]
-                if v["carried_by"] == 0 or v["rescued"]
-            }
-
-            first_pickups = picked_up - self.rewarded_pickups
-            self.rewarded_pickups.update(picked_up)
-
-            reward += len(first_pickups) - 0.001
+            if self.reward_shaper is None:
+                self.reward_shaper = RewardShaper()
+            reward += self.reward_shaper.compute_reward(
+                result["victims"],
+                newly_uncovered_cells=newly_uncovered,
+            )
 
         # New optional navigation reward.
         if self.navigation_shaping:
@@ -355,9 +377,8 @@ class RescueEnv(gym.Env):
 
             reward += potential_reward(before, after)
 
-        observation = self._get_observation()
         if self.exploration_bonus and searching:
-            reward += float(self.exploration_bonus * (self.memory.explored.sum() - explored_before))
+            reward += float(self.exploration_bonus * newly_uncovered)
 
         rescued = sum(
             int(v["rescued"]) for v in result["victims"]

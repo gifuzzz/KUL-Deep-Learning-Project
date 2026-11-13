@@ -75,3 +75,59 @@ def state_potential(sim, max_distance=64):
 
 def potential_reward(before, after, gamma=0.99, beta=0.1):
     return beta * (gamma * after - before)
+
+
+class RewardShaper:
+    """Training-only reward shaping for single-agent rescue.
+
+    Components:
+    - Step penalty: -0.001 per step
+    - First victim pickup: +1.5 per victim
+    - Frontier exploration: +0.05 per newly uncovered cell in memory_map (capped at +3.0 per episode)
+    """
+
+    def __init__(
+        self,
+        step_penalty: float = 0.001,
+        pickup_reward: float = 1.5,
+        exploration_bonus: float = 0.05,
+        max_exploration_reward: float = 3.0,
+    ):
+        self.step_penalty = float(step_penalty)
+        self.pickup_reward = float(pickup_reward)
+        self.exploration_bonus = float(exploration_bonus)
+        self.max_exploration_reward = float(max_exploration_reward)
+        self.rewarded_pickups = set()
+        self.total_exploration_reward = 0.0
+
+    def reset(self):
+        self.rewarded_pickups.clear()
+        self.total_exploration_reward = 0.0
+
+    def compute_reward(self, victims, newly_uncovered_cells: int = 0) -> float:
+        shaping = 0.0
+
+        # Step penalty
+        shaping -= self.step_penalty
+
+        # First victim pickup
+        picked_up = {
+            v["id"]
+            for v in victims
+            if v["carried_by"] == 0 or v["rescued"]
+        }
+        first_pickups = picked_up - self.rewarded_pickups
+        if first_pickups:
+            self.rewarded_pickups.update(first_pickups)
+            shaping += self.pickup_reward * len(first_pickups)
+
+        # Frontier exploration reward (+0.05/cell, capped at +3.0/episode)
+        if newly_uncovered_cells > 0 and self.total_exploration_reward < self.max_exploration_reward:
+            bonus = newly_uncovered_cells * self.exploration_bonus
+            remaining = self.max_exploration_reward - self.total_exploration_reward
+            actual_bonus = min(bonus, remaining)
+            self.total_exploration_reward += actual_bonus
+            shaping += actual_bonus
+
+        return float(shaping)
+
