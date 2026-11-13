@@ -1,0 +1,1036 @@
+{
+  "model_path": "models/autonomous_rl_v1/smoke_model.zip",
+  "device": "mps",
+  "evaluation_environment": {
+    "max_steps": 64,
+    "victim_distance": 2,
+    "min_victim_distance": 1,
+    "reward_shaping": false,
+    "navigation_shaping": false,
+    "native_reward_only": "+10 native rescue only"
+  },
+  "metrics": {
+    "deterministic": {
+      "episodes": 50,
+      "success_rate_percent": 18.0,
+      "mean_reward": 1.8,
+      "mean_episode_length": 56.28,
+      "mean_successful_episode_length": 21.11111111111111,
+      "pickup_rate_percent": 82.0,
+      "timeout_rate_percent": 82.0
+    },
+    "stochastic": {
+      "episodes": 50,
+      "success_rate_percent": 32.0,
+      "mean_reward": 3.2,
+      "mean_episode_length": 52.1,
+      "mean_successful_episode_length": 26.8125,
+      "pickup_rate_percent": 62.0,
+      "timeout_rate_percent": 68.0
+    }
+  },
+  "deterministic_detail": [
+    {
+      "episode": 1,
+      "seed": 20000,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 2,
+      "seed": 20001,
+      "success": true,
+      "reward": 10.0,
+      "steps": 60,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 3,
+      "seed": 20002,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 4,
+      "seed": 20003,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 5,
+      "seed": 20004,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 6,
+      "seed": 20005,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 7,
+      "seed": 20006,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 8,
+      "seed": 20007,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 9,
+      "seed": 20008,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 10,
+      "seed": 20009,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 11,
+      "seed": 20010,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 12,
+      "seed": 20011,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 13,
+      "seed": 20012,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 14,
+      "seed": 20013,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 15,
+      "seed": 20014,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 16,
+      "seed": 20015,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 17,
+      "seed": 20016,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 18,
+      "seed": 20017,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 19,
+      "seed": 20018,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 20,
+      "seed": 20019,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 21,
+      "seed": 20020,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 22,
+      "seed": 20021,
+      "success": true,
+      "reward": 10.0,
+      "steps": 60,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 23,
+      "seed": 20022,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 24,
+      "seed": 20023,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 25,
+      "seed": 20024,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 26,
+      "seed": 20025,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 27,
+      "seed": 20026,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 28,
+      "seed": 20027,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 29,
+      "seed": 20028,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 30,
+      "seed": 20029,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 31,
+      "seed": 20030,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 32,
+      "seed": 20031,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 33,
+      "seed": 20032,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 34,
+      "seed": 20033,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 35,
+      "seed": 20034,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 36,
+      "seed": 20035,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 37,
+      "seed": 20036,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 38,
+      "seed": 20037,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 39,
+      "seed": 20038,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 40,
+      "seed": 20039,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 41,
+      "seed": 20040,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 42,
+      "seed": 20041,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 43,
+      "seed": 20042,
+      "success": true,
+      "reward": 10.0,
+      "steps": 58,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 44,
+      "seed": 20043,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 45,
+      "seed": 20044,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 46,
+      "seed": 20045,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 47,
+      "seed": 20046,
+      "success": true,
+      "reward": 10.0,
+      "steps": 2,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 48,
+      "seed": 20047,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 49,
+      "seed": 20048,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 50,
+      "seed": 20049,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    }
+  ],
+  "stochastic_detail": [
+    {
+      "episode": 1,
+      "seed": 30000,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 2,
+      "seed": 30001,
+      "success": true,
+      "reward": 10.0,
+      "steps": 35,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 3,
+      "seed": 30002,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 4,
+      "seed": 30003,
+      "success": true,
+      "reward": 10.0,
+      "steps": 12,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 5,
+      "seed": 30004,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 6,
+      "seed": 30005,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 7,
+      "seed": 30006,
+      "success": true,
+      "reward": 10.0,
+      "steps": 34,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 8,
+      "seed": 30007,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 9,
+      "seed": 30008,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 10,
+      "seed": 30009,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 11,
+      "seed": 30010,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 12,
+      "seed": 30011,
+      "success": true,
+      "reward": 10.0,
+      "steps": 5,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 13,
+      "seed": 30012,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 14,
+      "seed": 30013,
+      "success": true,
+      "reward": 10.0,
+      "steps": 30,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 15,
+      "seed": 30014,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 16,
+      "seed": 30015,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 17,
+      "seed": 30016,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 18,
+      "seed": 30017,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 19,
+      "seed": 30018,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 20,
+      "seed": 30019,
+      "success": true,
+      "reward": 10.0,
+      "steps": 32,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 21,
+      "seed": 30020,
+      "success": true,
+      "reward": 10.0,
+      "steps": 24,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 22,
+      "seed": 30021,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 23,
+      "seed": 30022,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 24,
+      "seed": 30023,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 25,
+      "seed": 30024,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 26,
+      "seed": 30025,
+      "success": true,
+      "reward": 10.0,
+      "steps": 9,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 27,
+      "seed": 30026,
+      "success": true,
+      "reward": 10.0,
+      "steps": 10,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 28,
+      "seed": 30027,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 29,
+      "seed": 30028,
+      "success": true,
+      "reward": 10.0,
+      "steps": 17,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 30,
+      "seed": 30029,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 31,
+      "seed": 30030,
+      "success": true,
+      "reward": 10.0,
+      "steps": 4,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 32,
+      "seed": 30031,
+      "success": true,
+      "reward": 10.0,
+      "steps": 56,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 33,
+      "seed": 30032,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 34,
+      "seed": 30033,
+      "success": true,
+      "reward": 10.0,
+      "steps": 24,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 35,
+      "seed": 30034,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 36,
+      "seed": 30035,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 37,
+      "seed": 30036,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 38,
+      "seed": 30037,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 39,
+      "seed": 30038,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 40,
+      "seed": 30039,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 41,
+      "seed": 30040,
+      "success": true,
+      "reward": 10.0,
+      "steps": 53,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 42,
+      "seed": 30041,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 43,
+      "seed": 30042,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 44,
+      "seed": 30043,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 45,
+      "seed": 30044,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 46,
+      "seed": 30045,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 47,
+      "seed": 30046,
+      "success": true,
+      "reward": 10.0,
+      "steps": 30,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 48,
+      "seed": 30047,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": true,
+      "carrying_at_end": true
+    },
+    {
+      "episode": 49,
+      "seed": 30048,
+      "success": false,
+      "reward": 0.0,
+      "steps": 64,
+      "timeout": true,
+      "pickup": false,
+      "carrying_at_end": false
+    },
+    {
+      "episode": 50,
+      "seed": 30049,
+      "success": true,
+      "reward": 10.0,
+      "steps": 54,
+      "timeout": false,
+      "pickup": true,
+      "carrying_at_end": false
+    }
+  ]
+}

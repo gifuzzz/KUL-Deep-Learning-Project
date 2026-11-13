@@ -336,6 +336,12 @@ def parse_args():
     parser.add_argument("--eval-freq", type=int, default=10_000, help="Evaluation frequency in steps")
     parser.add_argument("--n-eval-episodes", type=int, default=20, help="Episodes per evaluation")
     parser.add_argument("--save-dir", type=str, default="./models/curriculum", help="Directory to save models")
+    parser.add_argument(
+        "--save-model",
+        type=str,
+        default=None,
+        help="Direct path to save the final model zip (e.g. ./models/autonomous_rl_v1/smoke_model.zip)",
+    )
     parser.add_argument("--checkpoint", type=str, default=None, help="Initial checkpoint path to load")
     parser.add_argument(
         "--skip-qualification-gate",
@@ -473,6 +479,12 @@ def main():
         final_model_path = save_dir / "final_model.zip"
         save_checkpoint(model, final_model_path)
         print(f"Training complete. Final checkpoint saved to {final_model_path}")
+
+        if args.save_model:
+            smoke_path = Path(args.save_model)
+            smoke_path.parent.mkdir(parents=True, exist_ok=True)
+            save_checkpoint(model, smoke_path)
+            print(f"Model saved to {smoke_path}")
 
     finally:
         train_env.close()

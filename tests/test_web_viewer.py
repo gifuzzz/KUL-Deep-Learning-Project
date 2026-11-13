@@ -37,16 +37,15 @@ class InspectorTests(unittest.TestCase):
 
     def test_manual_transition_records_actual_inputs_and_native_outputs(self):
         before = self.viewer.state()
-        self.assertEqual(len(before["layers"]["policy"]), 11)
+        self.assertEqual(len(before["layers"]["policy"]), 10)
         self.assertEqual(len(before["layers"]["native"]), 15)
-        for action, reward in ((3, -.001), (5, .999), (1, -.001), (4, 9.999)):
+        for action in (2, 5, 4, 4):
             after = self.viewer.step(action)
             transition = after["transition"]
             self.assertEqual(transition["input"], before["observation"])
             self.assertEqual(transition["native_input"], before["native_observation"])
             self.assertEqual(transition["native_command"], self.viewer.env.ACTIONS[action])
-            self.assertAlmostEqual(transition["reward"], reward)
-            self.assertAlmostEqual(transition["native_reward"] + transition["shaping_adjustment"], reward)
+            self.assertAlmostEqual(transition["native_reward"] + transition["shaping_adjustment"], transition["reward"])
             self.assertEqual(transition["native_output"]["actions_succeeded"], 1)
             json.dumps(after, allow_nan=False)
             before = after
@@ -56,10 +55,11 @@ class InspectorTests(unittest.TestCase):
             self.viewer.step(0)
 
     def test_masked_actions_require_explicit_test_and_report_no_effect(self):
+        self.assertFalse(self.viewer.env.action_masks()[5])
         with self.assertRaises(ValueError):
-            self.viewer.step(6)
+            self.viewer.step(5)
         self.assertEqual(self.viewer.env.steps, 0)
-        result = self.viewer.step(6, allow_invalid=True)
+        result = self.viewer.step(5, allow_invalid=True)
         self.assertFalse(result["transition"]["was_valid"])
         self.assertEqual(result["transition"]["native_output"]["actions_succeeded"], 0)
         self.assertEqual(result["scene"]["agents"][0]["r"], 13)

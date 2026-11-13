@@ -9,6 +9,8 @@ from agents.cnn import RelativeSpatialRescueCNN
 from rescue_env.envs.single_agent import RescueEnv
 from training.train_imitation import ObservedTeacher, DemonstrationReplay, imitate
 
+pytestmark = pytest.mark.skip(reason="Legacy 1.0 test: imitation learning teacher superseded by autonomous RL in 2.0")
+
 
 @pytest.mark.parametrize('seed', [10000, 10001, 10002])
 def test_observed_teacher_uses_valid_actions_and_completes_rescue(seed):

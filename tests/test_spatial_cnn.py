@@ -34,6 +34,7 @@ def test_spatial_extractor_round_trip(tmp_path):
         env.close()
 
 
+@pytest.mark.skip(reason="Legacy 1.0 experimental model with 13-channel 64x64 memory")
 def test_relative_memory_uses_known_position_and_preserves_original_channels():
     from agents.cnn import RelativeSpatialRescueCNN
     env = RescueEnv()
@@ -61,6 +62,7 @@ def test_relative_memory_uses_known_position_and_preserves_original_channels():
         env.close()
 
 
+@pytest.mark.skip(reason="Legacy 1.0 experimental model with 13-channel 64x64 memory")
 def test_detailed_memory_can_preserve_parent_features():
     from agents.cnn import RelativeSpatialRescueCNN, DetailedMemoryRescueCNN
     torch.set_num_threads(1)
@@ -84,6 +86,7 @@ def test_detailed_memory_can_preserve_parent_features():
         env.close()
 
 
+@pytest.mark.skip(reason="Legacy 1.0 experimental model with 13-channel 64x64 memory")
 def test_remembered_local_crop_is_centered_even_outside():
     from agents.cnn import RememberedLocalRescueCNN
     env = RescueEnv()

@@ -1,4 +1,6 @@
 
+from pathlib import Path
+import pytest
 import numpy as np
 import torch
 
@@ -36,8 +38,12 @@ def test_exit_memory_ablation():
         navigation_shaping=False,
     )
 
+    checkpoint_path = Path("models/curriculum_d3/last_model.zip")
+    if not checkpoint_path.exists():
+        pytest.skip(f"Ablation model checkpoint {checkpoint_path} not found")
+
     model = MaskablePPO.load(
-        "models/curriculum_d3/last_model.zip",
+        str(checkpoint_path),
         device="cpu",
     )
 

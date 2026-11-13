@@ -40,7 +40,8 @@ NATIVE_LAYERS = (
 def layers_for(env):
     native = [dict(name=name, description=description, color=color, native_index=i)
               for i, (name, description, color) in enumerate(NATIVE_LAYERS)]
-    policy = [native[i] for i in env.SELECTED_CHANNELS]
+    selected = getattr(env, "SELECTED_CHANNELS", tuple(range(min(len(native), env.NUM_CHANNELS))))
+    policy = [native[i] for i in selected]
     policy.append(dict(name="Visible exits", description="Visible interior exit cells",
                        color="#36996a", native_index=None))
     return {"policy": policy, "native": native}
@@ -86,11 +87,11 @@ class Inspector:
         model = MaskablePPO.load(path, device="cpu")
         navigation = model.observation_space["agent"].shape == (8,)
         candidate = self.env
-        if navigation != self.env.navigation:
+        if navigation != getattr(self.env, "navigation", False):
             candidate = RescueEnv(max_steps=1500 if navigation else 64,
                                   victim_distance=40 if navigation else 2,
                                   min_victim_distance=20 if navigation else 1,
-                                  navigation=navigation, reward_shaping=self.env.reward_shaping)
+                                  reward_shaping=self.env.reward_shaping)
         if (model.observation_space != candidate.observation_space
                 or model.action_space != candidate.action_space):
             if candidate is not self.env:
@@ -161,7 +162,7 @@ class Inspector:
             "trained_steps": self.model.num_timesteps if self.model else None,
             "checkpoints": self.checkpoints(), "layers": layers_for(self.env),
             "feature_names": (FEATURE_NAMES + ("Waypoint row delta", "Waypoint column delta",
-                                                "Navigation subtask") if self.env.navigation
+                                                "Navigation subtask") if getattr(self.env, "navigation", False)
                               else FEATURE_NAMES), "action_names": ACTION_NAMES,
             "native_commands": self.env.ACTIONS,
             "observation": {key: value.tolist() for key, value in self.observation.items()},

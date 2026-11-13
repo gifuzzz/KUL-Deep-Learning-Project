@@ -7,6 +7,9 @@ from agents.cnn import RescueCNN
 from rescue_env.envs.single_agent import RescueEnv
 
 
+pytestmark = pytest.mark.skip(reason="Legacy 1.0 test: optional 14th channel agent marker superseded by 2.0 9-channel fixed architecture")
+
+
 def test_marker_tracks_agent_without_changing_observed_contents():
     baseline = RescueEnv(max_steps=64, victim_distance=3)
     marked = RescueEnv(max_steps=64, victim_distance=3, memory_agent_marker=True)

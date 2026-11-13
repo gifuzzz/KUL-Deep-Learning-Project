@@ -9,9 +9,9 @@ def test_exploration_rewards_only_new_observations_before_victim_seen():
     try:
         before, _ = env.reset(seed=10000)
         assert not env.victim_seen
-        explored = before['memory'][11].sum()
+        explored = before['memory'][5].sum()
         after, reward, _, _, _ = env.step(4)
-        newly_seen = after['memory'][11].sum() - explored
+        newly_seen = after['memory'][5].sum() - explored
         assert newly_seen > 0
         assert isinstance(reward, float)
         assert reward == pytest.approx(.01 * newly_seen)
@@ -19,7 +19,7 @@ def test_exploration_rewards_only_new_observations_before_victim_seen():
         assert reward == 0
         reset, _ = env.reset(seed=10000)
         assert not env.victim_seen
-        np.testing.assert_array_equal(reset['memory'][11], before['memory'][11])
+        np.testing.assert_array_equal(reset['memory'][5], before['memory'][5])
     finally:
         env.close()
 
@@ -30,7 +30,7 @@ def test_visible_victim_disables_exploration_bonus():
         before, _ = env.reset(seed=42)
         assert env.victim_seen
         after, reward, _, _, _ = env.step(2)
-        assert after['memory'][11].sum() > before['memory'][11].sum()
+        assert after['memory'][5].sum() > before['memory'][5].sum()
         assert reward == 0
     finally:
         env.close()

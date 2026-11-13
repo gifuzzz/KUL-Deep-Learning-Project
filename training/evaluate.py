@@ -150,6 +150,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.output_json and args.output_json.exists():
+        parser.error(f"output already exists: {args.output_json}")
+
     if args.episodes < 1 or args.scenario_start < 0 or args.max_steps < 1:
         parser.error("episodes must be positive, scenario-start nonnegative, max-steps positive")
 
@@ -362,6 +365,7 @@ def main():
                 "min_victim_distance": args.min_victim_distance,
                 "max_steps": args.max_steps,
                 "episodes_count": args.episodes,
+                "memory_agent_marker": args.memory_agent_marker,
                 "mean_reward": mean_reward,
                 "success_rate": success_rate,
                 "timeout_rate": timeout_rate,
