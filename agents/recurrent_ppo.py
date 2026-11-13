@@ -288,6 +288,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
         entropy_losses = []
         pg_losses, value_losses = [], []
         clip_fractions = []
+        gru_grad_norms = []
 
         continue_training = True
 
@@ -352,6 +353,19 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 self.policy.optimizer.zero_grad()
                 loss.backward()
+
+                # Measure GRU gradient norm before clipping
+                gru_module = getattr(self.policy, "gru", None) or getattr(self.policy, "lstm_actor", None)
+                if gru_module is not None:
+                    gru_grads = [p.grad for p in gru_module.parameters() if p.grad is not None]
+                    if gru_grads:
+                        gru_norm = th.norm(th.stack([th.norm(g.detach(), 2) for g in gru_grads]), 2).item()
+                    else:
+                        gru_norm = 0.0
+                else:
+                    gru_norm = 0.0
+                gru_grad_norms.append(gru_norm)
+
                 th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.policy.optimizer.step()
 
@@ -360,6 +374,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 break
 
         explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
+        mean_gru_grad_norm = float(np.mean(gru_grad_norms)) if gru_grad_norms else 0.0
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/explained_variance", explained_var)
@@ -369,6 +384,24 @@ class MaskableRecurrentPPO(RecurrentPPO):
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
+        self.logger.record("train/gru_grad_norm", mean_gru_grad_norm)
+
+        update_record = {
+            "update": int(self._n_updates),
+            "timesteps": int(self.num_timesteps),
+            "policy_loss": float(np.mean(pg_losses)),
+            "value_loss": float(np.mean(value_losses)),
+            "entropy": float(-np.mean(entropy_losses)),
+            "entropy_loss": float(np.mean(entropy_losses)),
+            "approx_kl": float(np.mean(approx_kl_divs)),
+            "clip_fraction": float(np.mean(clip_fractions)),
+            "loss": float(loss.item()),
+            "explained_variance": float(explained_var),
+            "gru_grad_norm": mean_gru_grad_norm,
+        }
+        if not hasattr(self, "training_metrics_history"):
+            self.training_metrics_history = []
+        self.training_metrics_history.append(update_record)
 
     def predict(
         self,

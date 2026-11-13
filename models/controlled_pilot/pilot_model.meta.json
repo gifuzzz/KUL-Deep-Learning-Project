@@ -1,0 +1,18 @@
+{
+  "git_commit": "67d174bd980f1978aa4662d84f05c963360a2b3e",
+  "total_timesteps": 16384,
+  "policy_class": "RecurrentSpatialRescueCNN",
+  "algorithm": "MaskableRecurrentPPO",
+  "experiment": "controlled_pilot",
+  "timesteps": 16384,
+  "device": "mps",
+  "seed": 42,
+  "hyperparameters": {
+    "n_steps": 32,
+    "n_envs": 4,
+    "batch_size": 64,
+    "n_epochs": 4,
+    "learning_rate": 0.0001,
+    "ent_coef": 0.01
+  }
+}
