@@ -297,6 +297,7 @@ All 112 active unit tests pass cleanly:
 ```
 
 ### 8.3 Git Commit Identification
+- Commit Hash: `7eded2e` (`feat(curriculum): implement dual-guard retention in Stage 2C and author regression analysis report`)
 - Previous Commit: `665ad73 Add Phase 5 pilot ablation comparison results and diagnostic table`
-- Current Branch: `main`
-- Status: Ready for commit.
+- Branch: `main`
+- Status: Clean working tree, all tests passing (112 passed, 12 skipped).
