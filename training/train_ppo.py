@@ -356,15 +356,17 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         self.deterministic = deterministic
         self.best_mean_reward = -float("inf")
         self.best_success_rate = -1.0
+        self.last_eval_step = 0
 
     def _on_step(self) -> bool:
-        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+        if self.eval_freq > 0 and (self.num_timesteps - self.last_eval_step >= self.eval_freq):
+            self.last_eval_step = self.num_timesteps
             metrics = evaluate_unshaped(
                 self.model,
                 self.eval_env,
                 n_episodes=self.n_eval_episodes,
                 deterministic=self.deterministic,
-                seed_start=30000 + self.n_calls,
+                seed_start=30000 + self.num_timesteps,
             )
             if self.verbose > 0:
                 print(
@@ -373,7 +375,7 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                     f"Success Rate: {metrics['success_rate'] * 100:.1f}% | "
                     f"Avg Steps: {metrics['mean_length']:.1f}"
                 )
-            if self.best_model_save_path and metrics["mean_reward"] > self.best_mean_reward:
+            if self.best_model_save_path and metrics["success_rate"] >= self.best_success_rate:
                 self.best_mean_reward = metrics["mean_reward"]
                 self.best_success_rate = metrics["success_rate"]
                 save_checkpoint(self.model, self.best_model_save_path / "best_model.zip")
@@ -447,14 +449,14 @@ def parse_args():
         help="Device to train on (default: auto)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate (default: 3e-4)")
     parser.add_argument("--n-steps", type=int, default=128, help="Rollout steps per update")
     parser.add_argument("--batch-size", type=int, default=64, help="Minibatch size")
     parser.add_argument("--n-epochs", type=int, default=4, help="Epochs per update")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient")
-    parser.add_argument("--eval-freq", type=int, default=10_000, help="Evaluation frequency in steps")
-    parser.add_argument("--n-eval-episodes", type=int, default=20, help="Episodes per evaluation")
+    parser.add_argument("--ent-coef", type=float, default=0.001, help="Entropy coefficient (default: 0.001)")
+    parser.add_argument("--eval-freq", type=int, default=5_000, help="Evaluation frequency in steps (default: 5,000)")
+    parser.add_argument("--n-eval-episodes", type=int, default=20, help="Episodes per evaluation (default: 20)")
     parser.add_argument("--save-dir", type=str, default="./models/curriculum", help="Directory to save models")
     parser.add_argument(
         "--save-model",
@@ -471,8 +473,20 @@ def parse_args():
     parser.add_argument(
         "--near-ratio",
         type=float,
-        default=0.70,
-        help="Stage 1 mixed near victim ratio (default: 0.70)",
+        default=1.0,
+        help="Stage 1 near victim ratio (default: 1.0)",
+    )
+    parser.add_argument(
+        "--navigation-shaping",
+        action="store_true",
+        default=True,
+        help="Enable navigation potential shaping during training (default: True)",
+    )
+    parser.add_argument(
+        "--no-navigation-shaping",
+        action="store_false",
+        dest="navigation_shaping",
+        help="Disable navigation shaping during training",
     )
     parser.add_argument(
         "--checkpoint",
@@ -546,6 +560,7 @@ def main():
     train_env = make_train_env(
         stage=initial_stage,
         reward_shaping=True,
+        navigation_shaping=args.navigation_shaping,
         near_ratio=args.near_ratio,
         n_envs=args.n_envs,
         base_seed=args.seed,
@@ -586,26 +601,10 @@ def main():
                 deterministic=True,
             )
 
-            # Two-phase Stage 1 curriculum:
-            # Phase 1A: near-rescue mastery (100% near victims) to solidify the pickup-and-exit loop
-            # Phase 1B: mixed visibility curriculum (70% near, 30% medium)
-            phase1a_steps = min(80_000, int(stage1_steps * 0.35))
-            phase1b_steps = stage1_steps - phase1a_steps
-
-            if phase1a_steps > 0:
-                print(f"--- Stage 1A: Near-Rescue Mastery ({phase1a_steps} steps, 100% near victims) ---")
-                set_env_stage(train_env, stage=1, near_ratio=1.0)
-                model.learn(
-                    total_timesteps=phase1a_steps,
-                    callback=callback1,
-                    tb_log_name="PPO_Curriculum_Stage1",
-                    reset_num_timesteps=False,
-                )
-
-            print(f"--- Stage 1B: Mixed Near/Medium Curriculum ({phase1b_steps} steps, {int(args.near_ratio*100)}% near / {int((1-args.near_ratio)*100)}% medium) ---")
+            print(f"--- Stage 1: Near-Rescue Mastery ({stage1_steps} steps, {int(args.near_ratio*100)}% near victims) ---")
             set_env_stage(train_env, stage=1, near_ratio=args.near_ratio)
             model.learn(
-                total_timesteps=phase1b_steps,
+                total_timesteps=stage1_steps,
                 callback=callback1,
                 tb_log_name="PPO_Curriculum_Stage1",
                 reset_num_timesteps=False,
