@@ -19,6 +19,7 @@ Reports both Deterministic and Stochastic metrics on identical held-out seed set
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import sys
 from pathlib import Path
@@ -172,6 +173,31 @@ def evaluate_tier(
     }
 
 
+def _eval_worker(task):
+    model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, deterministic, device = task
+    dummy_env = make_eval_env(victim_distance=2, max_steps=64)
+    model = load_checkpoint(model_path, env=dummy_env, device=device)
+    dummy_env.close()
+    res = evaluate_tier(
+        model,
+        victim_distance=dist,
+        min_victim_distance=min_dist,
+        max_steps=max_s,
+        n_episodes=n_episodes,
+        seed_start=seed_start,
+        deterministic=deterministic,
+        device=device,
+    )
+    mode_str = "deterministic" if deterministic else "stochastic"
+    print(
+        f"[{tier_name}] {mode_str:<13}: Rescue={res['rescue_success']:>5.1f}%, "
+        f"Pick={res['pickup_rate']:>5.1f}%, Disc={res['discovery_rate']:>5.1f}%, "
+        f"Osc={res['oscillation_frequency']:>4.1f}%",
+        flush=True,
+    )
+    return tier_name, mode_str, res
+
+
 def run_full_diagnosis(
     model_path: str,
     device: str = "cpu",
@@ -179,11 +205,8 @@ def run_full_diagnosis(
     seed_start: int = 50000,
     preset: str = "all",
     tiers: list[tuple[str, int | None, int, int]] | None = None,
+    workers: int = 1,
 ) -> dict:
-    dummy_env = make_eval_env(victim_distance=2, max_steps=64)
-    model = load_checkpoint(model_path, env=dummy_env, device=device)
-    dummy_env.close()
-
     if tiers is None:
         if preset == "legacy":
             tiers = LEGACY_TIERS
@@ -191,6 +214,22 @@ def run_full_diagnosis(
             tiers = BRIDGE_TIERS
         else:
             tiers = CURRICULUM_TIERS
+
+    if workers > 1:
+        tasks = []
+        for tier_name, dist, min_dist, max_s in tiers:
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            worker_results = list(executor.map(_eval_worker, tasks))
+        results = {tier[0]: {} for tier in tiers}
+        for tier_name, mode_str, res in worker_results:
+            results[tier_name][mode_str] = res
+        return results
+
+    dummy_env = make_eval_env(victim_distance=2, max_steps=64)
+    model = load_checkpoint(model_path, env=dummy_env, device=device)
+    dummy_env.close()
 
     results = {}
     for tier_name, dist, min_dist, max_s in tiers:
@@ -204,6 +243,7 @@ def run_full_diagnosis(
             deterministic=True,
             device=device,
         )
+        print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%", flush=True)
         stoch = evaluate_tier(
             model,
             victim_distance=dist,
@@ -214,6 +254,7 @@ def run_full_diagnosis(
             deterministic=False,
             device=device,
         )
+        print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%", flush=True)
         results[tier_name] = {
             "deterministic": det,
             "stochastic": stoch,
@@ -264,6 +305,7 @@ if __name__ == "__main__":
         help="Optional architecture variant override",
     )
     parser.add_argument("--output-json", type=str, default=None)
+    parser.add_argument("--workers", type=int, default=1, help="Parallel worker processes for tiers (default: 1)")
     args = parser.parse_args()
 
     res = run_full_diagnosis(
@@ -272,6 +314,7 @@ if __name__ == "__main__":
         n_episodes=args.episodes,
         seed_start=args.seed_start,
         preset=args.tier,
+        workers=args.workers,
     )
     print_table(res, args.model)
     if args.output_json:

@@ -114,16 +114,32 @@ class CurriculumRescueEnv(RescueEnv):
           60% Near (d=2, min=1, max_steps=64)
           30% Medium (d=6, min=3, max_steps=128)
           10% Distant (d=None, min=1, max_steps=256)
+      - Substage 'reinforce_medium' (Self-healing when medium retention drops below 25%):
+          30% Near (d=2, min=1, max_steps=64)
+          45% Medium (d=6, min=3, max_steps=128)
+          25% Bridge (active bridge tier: Bridge A / B / C)
     """
 
     def __init__(self, stage: int | str = 1, near_ratio: float = 0.70, substage: str = "2A", **kwargs):
         super().__init__(**kwargs)
         self.stage = normalize_stage(stage)
         self.near_ratio = float(near_ratio)
+        self.active_bridge = "bridge_a"
         if self.stage == "2C" and substage == "2A":
             self.substage = "2C_bridge8"
         else:
             self.substage = str(substage)
+        self._update_active_bridge(self.substage)
+
+    def _update_active_bridge(self, substage: str) -> None:
+        if substage == "2C_bridge8":
+            self.active_bridge = "bridge_a"
+        elif substage == "2C_bridge10":
+            self.active_bridge = "bridge_b"
+        elif substage == "2C_bridge12":
+            self.active_bridge = "bridge_c"
+        elif substage == "2C_distant":
+            self.active_bridge = "bridge_c"
 
     def _apply_tier_config(self, tier_name: str) -> None:
         cfg = DISTANCE_CONFIGS[tier_name]
@@ -137,8 +153,10 @@ class CurriculumRescueEnv(RescueEnv):
             self.near_ratio = float(near_ratio)
         if substage is not None:
             self.substage = str(substage)
+            self._update_active_bridge(self.substage)
         elif self.stage == "2C" and self.substage in ("2A", "2B"):
             self.substage = "2C_bridge8"
+            self._update_active_bridge(self.substage)
 
     def reset(self, *, seed=None, options=None):
         if options and "stage" in options:
@@ -147,6 +165,7 @@ class CurriculumRescueEnv(RescueEnv):
             self.near_ratio = float(options["near_ratio"])
         if options and "substage" in options:
             self.substage = str(options["substage"])
+            self._update_active_bridge(self.substage)
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
@@ -156,7 +175,7 @@ class CurriculumRescueEnv(RescueEnv):
                 self._apply_tier_config("near")
             else:
                 self._apply_tier_config("medium")
-        elif self.stage == "2C" or str(self.substage).startswith("2C_"):
+        elif self.stage == "2C" or str(self.substage).startswith("2C_") or self.substage in ("reinforce_near", "reinforce_medium"):
             # Stage 2C Distance Bridge Curriculum
             if self.substage == "reinforce_near":
                 if roll < 0.60:
@@ -167,6 +186,14 @@ class CurriculumRescueEnv(RescueEnv):
                     self.victim_distance = None
                     self.min_victim_distance = 1
                     self.max_steps = 256
+            elif self.substage == "reinforce_medium":
+                if roll < 0.30:
+                    self._apply_tier_config("near")
+                elif roll < 0.75:
+                    self._apply_tier_config("medium")
+                else:
+                    bridge_tier = getattr(self, "active_bridge", "bridge_a")
+                    self._apply_tier_config(bridge_tier)
             elif self.substage == "2C_bridge8":
                 if roll < 0.20:
                     self._apply_tier_config("near")
@@ -443,6 +470,8 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         hyperparameters: dict[str, Any] | None = None,
         seed_start: int = 50000,
         verbose: int = 1,
+        stage2c_mode: str = "retention_aware",
+        checkpoint_freq: int | None = None,
     ):
         super().__init__(verbose=verbose)
         self.stage = normalize_stage(stage)
@@ -459,6 +488,9 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         self.deterministic = deterministic
         self.hyperparameters = hyperparameters or {}
         self.seed_start = seed_start
+        self.stage2c_mode = stage2c_mode
+        self.checkpoint_freq = checkpoint_freq
+        self.initial_timesteps: int | None = None
 
         # Best metric tracking for strict improvement
         self.best_s2_success = 0.0
@@ -480,8 +512,14 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         mean_rew: float,
         mean_len: float,
         bridge_succ: float = 0.0,
+        med_succ: float = 0.0,
     ) -> bool:
         """Strict improvement evaluation policy with explicit tie-breaking."""
+        # In retention_aware mode, never save a new best if prerequisite near or medium retention is violated
+        if self.stage == "2C" and self.stage2c_mode == "retention_aware":
+            if near_succ < 0.80 or med_succ < 0.25:
+                return False
+
         # 1. Primary metric: Stage 2/2C hidden-victim rescue success (S_2 > 0)
         if s2_succ > 0.0:
             if s2_succ > self.best_s2_success:
@@ -654,6 +692,7 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                 combined_reward,
                 combined_length,
                 bridge_succ=active_bridge_succ,
+                med_succ=med_metrics["success_rate"],
             ):
                 self.best_s2_success = s2_metrics["success_rate"]
                 self.best_near_retention = near_metrics["success_rate"]
@@ -690,60 +729,202 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                         f"(Distant Succ: {self.best_s2_success*100:.1f}%, Near Ret: {self.best_near_retention*100:.1f}%)"
                     )
 
+            # Periodic Milestone Checkpoints (e.g. at 10k, 25k steps)
+            if self.best_model_save_path:
+                if self.initial_timesteps is None:
+                    self.initial_timesteps = self.model.num_timesteps
+                elapsed = self.num_timesteps - self.initial_timesteps
+
+                if not hasattr(self, "_saved_10k") and elapsed >= 10000:
+                    self._saved_10k = True
+                    cp_path = self.best_model_save_path / "checkpoint_10000.zip"
+                    save_checkpoint(
+                        self.model,
+                        cp_path,
+                        metadata={
+                            "evaluation_step": self.num_timesteps,
+                            "elapsed_step": elapsed,
+                            "stage": self.stage,
+                            "substage": self.current_substage,
+                            "distant_success_rate": s2_metrics["success_rate"],
+                            "distant_pickup_rate": s2_metrics["pickup_rate"],
+                            "near_retention_rate": near_metrics["success_rate"],
+                            "medium_success_rate": med_metrics["success_rate"],
+                            "checkpoint_type": "checkpoint_10000",
+                        },
+                    )
+                    if self.verbose > 0:
+                        print(f"Saved periodic milestone checkpoint to {cp_path} (elapsed {elapsed} steps)")
+
+                if not hasattr(self, "_saved_25k") and elapsed >= 25000:
+                    self._saved_25k = True
+                    cp_path = self.best_model_save_path / "checkpoint_25000.zip"
+                    save_checkpoint(
+                        self.model,
+                        cp_path,
+                        metadata={
+                            "evaluation_step": self.num_timesteps,
+                            "elapsed_step": elapsed,
+                            "stage": self.stage,
+                            "substage": self.current_substage,
+                            "distant_success_rate": s2_metrics["success_rate"],
+                            "distant_pickup_rate": s2_metrics["pickup_rate"],
+                            "near_retention_rate": near_metrics["success_rate"],
+                            "medium_success_rate": med_metrics["success_rate"],
+                            "checkpoint_type": "checkpoint_25000",
+                        },
+                    )
+                    if self.verbose > 0:
+                        print(f"Saved periodic milestone checkpoint to {cp_path} (elapsed {elapsed} steps)")
+
+                if self.checkpoint_freq and elapsed > 0 and elapsed % self.checkpoint_freq == 0:
+                    cp_path = self.best_model_save_path / f"checkpoint_{elapsed}.zip"
+                    save_checkpoint(
+                        self.model,
+                        cp_path,
+                        metadata={
+                            "evaluation_step": self.num_timesteps,
+                            "elapsed_step": elapsed,
+                            "stage": self.stage,
+                            "substage": self.current_substage,
+                            "distant_success_rate": s2_metrics["success_rate"],
+                            "distant_pickup_rate": s2_metrics["pickup_rate"],
+                            "near_retention_rate": near_metrics["success_rate"],
+                            "medium_success_rate": med_metrics["success_rate"],
+                            "checkpoint_type": f"checkpoint_{elapsed}",
+                        },
+                    )
+                    if self.verbose > 0:
+                        print(f"Saved periodic milestone checkpoint to {cp_path}")
+
             # Adaptive Curriculum Self-Healing & Progression
             if self.train_env is not None:
-                if self.stage == "2C" or str(self.current_substage).startswith("2C_"):
-                    # Self-Healing: If Near Retention drops below 80%, shift to reinforce_near
-                    if near_metrics["success_rate"] < 0.80 and self.current_substage != "reinforce_near":
-                        self._prev_substage = self.current_substage
-                        self.current_substage = "reinforce_near"
-                        set_env_stage(self.train_env, stage="2C", substage="reinforce_near")
-                        if self.verbose > 0:
-                            print(
-                                f"\n>>> Curriculum Alert: Near retention dropped below 80% "
-                                f"({near_metrics['success_rate']*100:.1f}%). Shifting to 'reinforce_near' mode."
-                            )
-                    elif near_metrics["success_rate"] >= 0.85:
-                        if self.current_substage == "reinforce_near":
-                            resume_sub = getattr(self, "_prev_substage", "2C_bridge8")
-                            self.current_substage = resume_sub
-                            set_env_stage(self.train_env, stage="2C", substage=resume_sub)
+                if self.stage == "2C" or str(self.current_substage).startswith("2C_") or self.current_substage in ("reinforce_near", "reinforce_medium"):
+                    near_succ = near_metrics["success_rate"]
+                    med_succ = med_metrics["success_rate"]
+                    a_succ = bridge_a_metrics["success_rate"] if bridge_a_metrics else 0.0
+                    b_succ = bridge_b_metrics["success_rate"] if bridge_b_metrics else 0.0
+                    c_succ = bridge_c_metrics["success_rate"] if bridge_c_metrics else 0.0
+
+                    if self.stage2c_mode == "retention_aware":
+                        # Dual-Guard Retention Protection
+                        # Guard 1: Near Retention (drops to reinforce_near if < 80%)
+                        if near_succ < 0.80 and self.current_substage != "reinforce_near":
+                            if self.current_substage != "reinforce_medium":
+                                self._prev_substage = self.current_substage
+                            self.current_substage = "reinforce_near"
+                            set_env_stage(self.train_env, stage="2C", substage="reinforce_near")
                             if self.verbose > 0:
                                 print(
-                                    f"\n>>> Curriculum Recovered: Near retention restored to "
-                                    f"{near_metrics['success_rate']*100:.1f}%. Resuming {resume_sub}."
+                                    f"\n>>> Curriculum Alert [Guard 1]: Near retention dropped below 80% "
+                                    f"({near_succ*100:.1f}%). Shifting to 'reinforce_near' mode."
                                 )
+                        elif self.current_substage == "reinforce_near" and near_succ < 0.85:
+                            # Remain in reinforce_near until Near retention recovers to >= 85%
+                            pass
+                        # Guard 2: Medium Retention (drops to reinforce_medium if < 25%)
+                        elif med_succ < 0.25 and self.current_substage != "reinforce_medium":
+                            if self.current_substage != "reinforce_near":
+                                self._prev_substage = self.current_substage
+                            self.current_substage = "reinforce_medium"
+                            set_env_stage(self.train_env, stage="2C", substage="reinforce_medium")
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Alert [Guard 2]: Medium retention dropped below 25% "
+                                    f"({med_succ*100:.1f}%). Shifting to 'reinforce_medium' mode."
+                                )
+                        elif self.current_substage == "reinforce_medium" and med_succ < 0.30:
+                            # Remain in reinforce_medium until Medium retention recovers to >= 30%
+                            pass
+                        elif near_succ >= 0.85 and med_succ >= 0.30:
+                            # Both guards satisfied: Near >= 85% AND Medium >= 30%
+                            if self.current_substage in ("reinforce_near", "reinforce_medium"):
+                                resume_sub = getattr(self, "_prev_substage", "2C_bridge8")
+                                self.current_substage = resume_sub
+                                set_env_stage(self.train_env, stage="2C", substage=resume_sub)
+                                if self.verbose > 0:
+                                    print(
+                                        f"\n>>> Curriculum Recovered: Dual guards satisfied (Near: {near_succ*100:.1f}%, "
+                                        f"Med: {med_succ*100:.1f}%). Resuming {resume_sub}."
+                                    )
 
-                        if self.current_substage == "2C_bridge8":
-                            a_succ = bridge_a_metrics["success_rate"] if bridge_a_metrics else 0.0
-                            if a_succ >= 0.40:
-                                self.current_substage = "2C_bridge10"
-                                set_env_stage(self.train_env, stage="2C", substage="2C_bridge10")
+                            # Milestone Promotions: Require Near >= 85% AND Medium >= 30%
+                            if self.current_substage == "2C_bridge8":
+                                if a_succ >= 0.20:
+                                    self.current_substage = "2C_bridge10"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_bridge10")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near >= 85%, Med >= 30%, and Bridge A (d=8) "
+                                            f"success >= 20% ({a_succ*100:.1f}%). Advancing to 2C_bridge10."
+                                        )
+                            elif self.current_substage == "2C_bridge10":
+                                if b_succ >= 0.10:
+                                    self.current_substage = "2C_bridge12"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_bridge12")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near >= 85%, Med >= 30%, and Bridge B (d=10) "
+                                            f"success >= 10% ({b_succ*100:.1f}%). Advancing to 2C_bridge12."
+                                        )
+                            elif self.current_substage == "2C_bridge12":
+                                if c_succ >= 0.10:
+                                    self.current_substage = "2C_distant"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_distant")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near >= 85%, Med >= 30%, and Bridge C (d=12) "
+                                            f"success >= 10% ({c_succ*100:.1f}%). Advancing to 2C_distant."
+                                        )
+                    else:
+                        # Original Stage 2C Logic (Single Near guard, 40% bridge thresholds)
+                        if near_succ < 0.80 and self.current_substage != "reinforce_near":
+                            self._prev_substage = self.current_substage
+                            self.current_substage = "reinforce_near"
+                            set_env_stage(self.train_env, stage="2C", substage="reinforce_near")
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Alert: Near retention dropped below 80% "
+                                    f"({near_succ*100:.1f}%). Shifting to 'reinforce_near' mode."
+                                )
+                        elif near_succ >= 0.85:
+                            if self.current_substage == "reinforce_near":
+                                resume_sub = getattr(self, "_prev_substage", "2C_bridge8")
+                                self.current_substage = resume_sub
+                                set_env_stage(self.train_env, stage="2C", substage=resume_sub)
                                 if self.verbose > 0:
                                     print(
-                                        f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge A (d=8) "
-                                        f"success >= 40% ({a_succ*100:.1f}%). Advancing to 2C_bridge10."
+                                        f"\n>>> Curriculum Recovered: Near retention restored to "
+                                        f"{near_succ*100:.1f}%. Resuming {resume_sub}."
                                     )
-                        elif self.current_substage == "2C_bridge10":
-                            b_succ = bridge_b_metrics["success_rate"] if bridge_b_metrics else 0.0
-                            if b_succ >= 0.40:
-                                self.current_substage = "2C_bridge12"
-                                set_env_stage(self.train_env, stage="2C", substage="2C_bridge12")
-                                if self.verbose > 0:
-                                    print(
-                                        f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge B (d=10) "
-                                        f"success >= 40% ({b_succ*100:.1f}%). Advancing to 2C_bridge12."
-                                    )
-                        elif self.current_substage == "2C_bridge12":
-                            c_succ = bridge_c_metrics["success_rate"] if bridge_c_metrics else 0.0
-                            if c_succ >= 0.40:
-                                self.current_substage = "2C_distant"
-                                set_env_stage(self.train_env, stage="2C", substage="2C_distant")
-                                if self.verbose > 0:
-                                    print(
-                                        f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge C (d=12) "
-                                        f"success >= 40% ({c_succ*100:.1f}%). Advancing to 2C_distant."
-                                    )
+
+                            if self.current_substage == "2C_bridge8":
+                                if a_succ >= 0.40:
+                                    self.current_substage = "2C_bridge10"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_bridge10")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge A (d=8) "
+                                            f"success >= 40% ({a_succ*100:.1f}%). Advancing to 2C_bridge10."
+                                        )
+                            elif self.current_substage == "2C_bridge10":
+                                if b_succ >= 0.40:
+                                    self.current_substage = "2C_bridge12"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_bridge12")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge B (d=10) "
+                                            f"success >= 40% ({b_succ*100:.1f}%). Advancing to 2C_bridge12."
+                                        )
+                            elif self.current_substage == "2C_bridge12":
+                                if c_succ >= 0.40:
+                                    self.current_substage = "2C_distant"
+                                    set_env_stage(self.train_env, stage="2C", substage="2C_distant")
+                                    if self.verbose > 0:
+                                        print(
+                                            f"\n>>> Curriculum Milestone: Near retention >= 85% and Bridge C (d=12) "
+                                            f"success >= 40% ({c_succ*100:.1f}%). Advancing to 2C_distant."
+                                        )
                 else:
                     # Stage 2 Staged Progression (Existing unchanged)
                     if near_metrics["success_rate"] < 0.80 and self.current_substage != "reinforce_near":
@@ -883,6 +1064,18 @@ def parse_args():
         action="store_false",
         dest="navigation_shaping",
         help="Disable navigation shaping during training",
+    )
+    parser.add_argument(
+        "--stage2c-mode",
+        choices=["retention_aware", "original"],
+        default="retention_aware",
+        help="Stage 2C curriculum mode: retention_aware (dual guard) or original (default: retention_aware)",
+    )
+    parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=None,
+        help="Periodic checkpoint save frequency in timesteps (default: None)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -1133,6 +1326,8 @@ def main():
                 deterministic=True,
                 hyperparameters=hyperparameters,
                 seed_start=50000,
+                stage2c_mode=args.stage2c_mode,
+                checkpoint_freq=args.checkpoint_freq,
             )
 
             model.learn(
