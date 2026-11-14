@@ -26,12 +26,16 @@ from rescue_env.envs.single_agent import RescueEnv
 from rescue_env.wrappers import PreviousActionWrapper
 
 
+from training.train_ppo import load_checkpoint
+
+
 def load_model(
     model_path: str | Path,
     env: RescueEnv | PreviousActionWrapper | None = None,
     device: str | torch.device = "auto",
+    expected_architecture: str | None = None,
 ) -> tuple[MaskableRecurrentPPO | MaskablePPO, torch.device]:
-    """Load model checkpoint safely mapping tensors to the target device."""
+    """Load model checkpoint safely mapping tensors to the target device with Checkpoint Guard."""
     if device == "auto":
         if torch.cuda.is_available():
             target_device = torch.device("cuda")
@@ -42,25 +46,13 @@ def load_model(
     else:
         target_device = torch.device(device)
 
-    custom_objects = {"policy_class": RecurrentSpatialRescueCNN}
-    model = None
-    for cls in (MaskableRecurrentPPO, MaskablePPO):
-        try:
-            model = cls.load(
-                str(model_path),
-                env=env,
-                device=target_device,
-                custom_objects=custom_objects,
-            )
-            break
-        except Exception:
-            continue
-
-    if model is None:
-        try:
-            model = MaskableRecurrentPPO.load(str(model_path), env=env, device=target_device)
-        except Exception:
-            model = MaskablePPO.load(str(model_path), env=env, device=target_device)
+    model = load_checkpoint(
+        model_path,
+        env=env,
+        device=target_device,
+        expected_architecture=expected_architecture,
+    )
+    return model, target_device
 
     if hasattr(model, "policy") and model.policy is not None:
         model.policy.to(target_device)
@@ -86,6 +78,14 @@ def main():
         nargs="?",
         default="models/baseline/best_model.zip",
         help="Path to trained model checkpoint zip file",
+    )
+    parser.add_argument(
+        "--architecture",
+        "--arch",
+        choices=["baseline", "deep128", "deep256"],
+        default=None,
+        dest="architecture",
+        help="Expected model architecture variant: baseline, deep128, or deep256 (default: auto-detect from checkpoint)",
     )
     parser.add_argument(
         "--episodes",
@@ -195,7 +195,12 @@ def main():
     model = None
     target_device = torch.device("cpu")
     if not args.random:
-        model, target_device = load_model(args.model, env=env, device=args.device)
+        model, target_device = load_model(
+            args.model,
+            env=env,
+            device=args.device,
+            expected_architecture=args.architecture,
+        )
 
     print(f"Device: {target_device}")
     print(f"Mode  : {'Random' if args.random else ('Deterministic' if deterministic else 'Sampled Stochastic')}")

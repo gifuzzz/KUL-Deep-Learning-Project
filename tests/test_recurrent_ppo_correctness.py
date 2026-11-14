@@ -104,7 +104,7 @@ def test_bptt_gradient_flows_across_time():
 
 def test_hidden_state_persistence_and_episode_resets():
     """Verify hidden states persist across rollout boundaries and reset ONLY on episode ends."""
-    raw_env = RescueEnv(max_steps=6, victim_distance=2)
+    raw_env = RescueEnv(max_steps=6, victim_distance=6)
     env = PreviousActionWrapper(raw_env)
     vec_env = DummyVecEnv([lambda: env])
 
@@ -116,6 +116,7 @@ def test_hidden_state_persistence_and_episode_resets():
         n_epochs=1,
         learning_rate=1e-4,
         device="cpu",
+        seed=42,
     )
 
     # Run rollout 1 (4 steps): episode has NOT ended (max_steps=6)

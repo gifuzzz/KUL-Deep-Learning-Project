@@ -43,6 +43,28 @@ OPPOSITE_ACTIONS = {
 }
 
 
+CURRICULUM_TIERS = [
+    ("Near (d=2, steps=64)", 2, 1, 64),
+    ("Medium (d=6, steps=128)", 6, 3, 128),
+    ("Bridge A (d=8, steps=160)", 8, 5, 160),
+    ("Bridge B (d=10, steps=192)", 10, 7, 192),
+    ("Bridge C (d=12, steps=256)", 12, 9, 256),
+    ("Distant (d=None, steps=384)", None, 1, 384),
+]
+
+LEGACY_TIERS = [
+    ("Near (d=2, steps=64)", 2, 1, 64),
+    ("Medium (d=6, steps=128)", 6, 3, 128),
+    ("Distant (d=None, steps=384)", None, 1, 384),
+]
+
+BRIDGE_TIERS = [
+    ("Bridge A (d=8, steps=160)", 8, 5, 160),
+    ("Bridge B (d=10, steps=192)", 10, 7, 192),
+    ("Bridge C (d=12, steps=256)", 12, 9, 256),
+]
+
+
 def evaluate_tier(
     model,
     victim_distance: int | None,
@@ -51,9 +73,11 @@ def evaluate_tier(
     seed_start: int = 50000,
     deterministic: bool = True,
     device: str = "cpu",
+    min_victim_distance: int = 1,
 ) -> dict[str, float]:
     env = RescueEnv(
         victim_distance=victim_distance,
+        min_victim_distance=min_victim_distance,
         max_steps=max_steps,
         reward_shaping=False,
         navigation_shaping=False,
@@ -148,22 +172,32 @@ def evaluate_tier(
     }
 
 
-def run_full_diagnosis(model_path: str, device: str = "cpu", n_episodes: int = 20, seed_start: int = 50000) -> dict:
+def run_full_diagnosis(
+    model_path: str,
+    device: str = "cpu",
+    n_episodes: int = 20,
+    seed_start: int = 50000,
+    preset: str = "all",
+    tiers: list[tuple[str, int | None, int, int]] | None = None,
+) -> dict:
     dummy_env = make_eval_env(victim_distance=2, max_steps=64)
     model = load_checkpoint(model_path, env=dummy_env, device=device)
     dummy_env.close()
 
-    tiers = [
-        ("Near (d=2, steps=64)", 2, 64),
-        ("Medium (d=6, steps=128)", 6, 128),
-        ("Distant (d=None, steps=384)", None, 384),
-    ]
+    if tiers is None:
+        if preset == "legacy":
+            tiers = LEGACY_TIERS
+        elif preset == "bridge":
+            tiers = BRIDGE_TIERS
+        else:
+            tiers = CURRICULUM_TIERS
 
     results = {}
-    for tier_name, dist, max_s in tiers:
+    for tier_name, dist, min_dist, max_s in tiers:
         det = evaluate_tier(
             model,
             victim_distance=dist,
+            min_victim_distance=min_dist,
             max_steps=max_s,
             n_episodes=n_episodes,
             seed_start=seed_start,
@@ -173,6 +207,7 @@ def run_full_diagnosis(model_path: str, device: str = "cpu", n_episodes: int = 2
         stoch = evaluate_tier(
             model,
             victim_distance=dist,
+            min_victim_distance=min_dist,
             max_steps=max_s,
             n_episodes=n_episodes,
             seed_start=seed_start,
@@ -187,17 +222,17 @@ def run_full_diagnosis(model_path: str, device: str = "cpu", n_episodes: int = 2
 
 
 def print_table(results: dict, title: str):
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 95)
     print(f"DIAGNOSTIC BENCHMARK: {title}")
-    print("=" * 90)
-    header = f"{'Tier':<25} | {'Mode':<5} | {'Disc%':<6} | {'Pick%':<6} | {'Resc%':<6} | {'Ret|Pick%':<9} | {'T/O Carr%':<9} | {'AvgLen':<6} | {'Osc%':<5}"
+    print("=" * 95)
+    header = f"{'Tier':<28} | {'Mode':<5} | {'Disc%':<6} | {'Pick%':<6} | {'Resc%':<6} | {'Ret|Pick%':<9} | {'T/O Carr%':<9} | {'AvgLen':<6} | {'Osc%':<5}"
     print(header)
-    print("-" * 90)
+    print("-" * 95)
     for tier_name, modes in results.items():
         for mode, m in modes.items():
             m_label = "Det" if mode == "deterministic" else "Stoch"
             print(
-                f"{tier_name:<25} | {m_label:<5} | "
+                f"{tier_name:<28} | {m_label:<5} | "
                 f"{m['discovery_rate']:>5.1f}% | "
                 f"{m['pickup_rate']:>5.1f}% | "
                 f"{m['rescue_success']:>5.1f}% | "
@@ -206,7 +241,7 @@ def print_table(results: dict, title: str):
                 f"{m['mean_successful_length']:>6.1f} | "
                 f"{m['oscillation_frequency']:>4.1f}%"
             )
-    print("=" * 90)
+    print("=" * 95)
 
 
 if __name__ == "__main__":
@@ -215,10 +250,22 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed-start", type=int, default=50000)
+    parser.add_argument(
+        "--tier",
+        choices=["all", "legacy", "bridge"],
+        default="all",
+        help="Evaluation tiers: all (2, 6, 8, 10, 12, Distant), legacy (2, 6, Distant), or bridge (8, 10, 12)",
+    )
     parser.add_argument("--output-json", type=str, default=None)
     args = parser.parse_args()
 
-    res = run_full_diagnosis(args.model, device=args.device, n_episodes=args.episodes, seed_start=args.seed_start)
+    res = run_full_diagnosis(
+        args.model,
+        device=args.device,
+        n_episodes=args.episodes,
+        seed_start=args.seed_start,
+        preset=args.tier,
+    )
     print_table(res, args.model)
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)

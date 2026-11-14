@@ -8,7 +8,11 @@ Extends sb3_contrib.RecurrentPPO with legal action masking:
 
 from __future__ import annotations
 
+import json
+import subprocess
+import zipfile
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Generator, NamedTuple
 
 import numpy as np
@@ -26,6 +30,12 @@ from sb3_contrib.common.recurrent.buffers import (
 )
 from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
 from sb3_contrib.common.maskable.utils import get_action_masks
+
+from agents.cnn import (
+    RecurrentSpatialRescueCNN,
+    inspect_checkpoint,
+    transfer_compatible_weights,
+)
 
 
 class MaskableRecurrentDictRolloutBufferSamples(NamedTuple):
@@ -150,6 +160,142 @@ class MaskableRecurrentDictRolloutBuffer(RecurrentDictRolloutBuffer):
 
 class MaskableRecurrentPPO(RecurrentPPO):
     """Maskable Recurrent PPO with legal action masking and multi-step BPTT."""
+
+    def __init__(
+        self,
+        policy: type[RecurrentActorCriticPolicy] | str,
+        env: GymEnv | str,
+        learning_rate: float | Schedule = 3e-4,
+        n_steps: int = 128,
+        batch_size: int = 64,
+        n_epochs: int = 4,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_range: float | Schedule = 0.2,
+        clip_range_vf: None | float | Schedule = None,
+        normalize_advantage: bool = True,
+        ent_coef: float = 0.0,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        use_sde: bool = False,
+        sde_sample_freq: int = -1,
+        target_kl: float | None = None,
+        stats_window_size: int = 100,
+        tensorboard_log: str | None = None,
+        policy_kwargs: dict[str, Any] | None = None,
+        verbose: int = 0,
+        seed: int | None = None,
+        device: th.device | str = "auto",
+        _init_setup_model: bool = True,
+        architecture_variant: str | None = None,
+        architecture: str | None = None,
+    ):
+        policy_kwargs = dict(policy_kwargs or {})
+        arch = architecture_variant or architecture
+        if arch is not None:
+            policy_kwargs["architecture_variant"] = arch
+
+        super().__init__(
+            policy=policy,
+            env=env,
+            learning_rate=learning_rate,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=n_epochs,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            clip_range=clip_range,
+            clip_range_vf=clip_range_vf,
+            normalize_advantage=normalize_advantage,
+            ent_coef=ent_coef,
+            vf_coef=vf_coef,
+            max_grad_norm=max_grad_norm,
+            use_sde=use_sde,
+            sde_sample_freq=sde_sample_freq,
+            target_kl=target_kl,
+            stats_window_size=stats_window_size,
+            tensorboard_log=tensorboard_log,
+            policy_kwargs=policy_kwargs,
+            verbose=verbose,
+            seed=seed,
+            device=device,
+            _init_setup_model=_init_setup_model,
+        )
+        self.architecture_variant = policy_kwargs.get("architecture_variant", "baseline")
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        env: GymEnv | None = None,
+        device: th.device | str = "auto",
+        custom_objects: dict[str, Any] | None = None,
+        print_system_info: bool = False,
+        force_reset: bool = True,
+        expected_architecture: str | None = None,
+        architecture: str | None = None,
+        **kwargs,
+    ) -> "MaskableRecurrentPPO":
+        """Load model with explicit Checkpoint Guard against architecture and tensor shape mismatches."""
+        expected_arch = expected_architecture or architecture
+
+        ckpt_info = inspect_checkpoint(path)
+        ckpt_arch = ckpt_info["architecture_variant"]
+
+        # Checkpoint Guard: Fail explicitly on architecture mismatch
+        if expected_arch is not None and expected_arch != ckpt_arch:
+            raise ValueError(
+                f"Checkpoint architecture mismatch for '{path}':\n"
+                f"  Checkpoint was saved with architecture : '{ckpt_arch}'\n"
+                f"  Expected architecture                  : '{expected_arch}'\n"
+                f"Loading mismatched weights is prohibited to prevent silent partial loading or corrupted inference.\n"
+                f"To transfer compatible feature extractor weights instead, call transfer_compatible_weights()."
+            )
+
+        target_arch = expected_arch or ckpt_arch
+
+        # Ensure custom_objects specifies correct policy class and architecture variant
+        custom_objects = dict(custom_objects or {})
+        custom_objects.setdefault("policy_class", RecurrentSpatialRescueCNN)
+        custom_policy_kwargs = dict(custom_objects.get("policy_kwargs") or {})
+        custom_policy_kwargs.setdefault("architecture_variant", target_arch)
+        custom_objects["policy_kwargs"] = custom_policy_kwargs
+
+        model = super().load(
+            str(path),
+            env=env,
+            device=device,
+            custom_objects=custom_objects,
+            print_system_info=print_system_info,
+            force_reset=force_reset,
+            **kwargs,
+        )
+
+        # Tensor Shape Checkpoint Guard
+        ckpt_state = ckpt_info["state_dict"]
+        model_state = model.policy.state_dict()
+        mismatches = []
+        for key, param in model_state.items():
+            if key not in ckpt_state:
+                mismatches.append(f"Missing key in checkpoint: {key}")
+            elif param.shape != ckpt_state[key].shape:
+                mismatches.append(
+                    f"Shape mismatch for '{key}': model shape {param.shape} vs checkpoint shape {ckpt_state[key].shape}"
+                )
+        for key in ckpt_state.keys():
+            if key not in model_state:
+                mismatches.append(f"Unexpected key in checkpoint: {key}")
+
+        if mismatches:
+            raise RuntimeError(
+                f"Checkpoint weight shape guard failed for '{path}':\n"
+                + "\n".join(f"  - {m}" for m in mismatches)
+                + "\nSilent partial loading is prohibited!"
+            )
+
+        model.checkpoint_metadata = ckpt_info.get("metadata", {})
+        model.architecture_variant = target_arch
+        return model
 
     def _setup_model(self) -> None:
         super()._setup_model()
@@ -418,3 +564,185 @@ class MaskableRecurrentPPO(RecurrentPPO):
             deterministic=deterministic,
             action_masks=action_masks,
         )
+
+
+def get_git_commit() -> str:
+    """Retrieve git commit hash or return unknown."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return commit
+    except Exception:
+        return "unknown"
+
+
+def save_checkpoint(
+    model: MaskableRecurrentPPO | Any,
+    path: str | Path,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Save model checkpoint safely casting policy and optimizer state dicts to CPU.
+
+    Supports CPU/MPS/CUDA cross-device transfer and saves metadata (stage, timesteps,
+    git commit, hyperparameters, architecture variant, hidden_size, total_params)
+    into the checkpoint zip and companion JSON file.
+    """
+    path = Path(path)
+    if "stage1_qualified.zip" in str(path) and path.exists():
+        raise RuntimeError("stage1_qualified.zip is immutable and cannot be overwritten!")
+    if "stage2_final.zip" in str(path) and path.exists():
+        raise RuntimeError("stage2_final.zip is immutable and cannot be overwritten!")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    orig_device = model.device
+
+    arch_variant = getattr(
+        model.policy,
+        "architecture_variant",
+        getattr(model, "architecture_variant", "baseline"),
+    )
+    hidden_size = getattr(model.policy, "hidden_size", 128)
+    total_params = sum(p.numel() for p in model.policy.parameters())
+
+    meta_dict = {
+        "git_commit": get_git_commit(),
+        "total_timesteps": getattr(model, "num_timesteps", 0),
+        "policy_class": model.policy.__class__.__name__,
+        "algorithm": model.__class__.__name__,
+        "architecture_variant": str(arch_variant),
+        "hidden_size": int(hidden_size),
+        "total_params": int(total_params),
+        "warm_started": getattr(model.policy, "is_warm_started", getattr(model, "is_warm_started", False)),
+        "warm_start_source": getattr(model.policy, "warm_start_source", getattr(model, "warm_start_source", None)),
+        "warm_start_transferred_layers": getattr(
+            model.policy,
+            "warm_start_transferred_layers",
+            getattr(model, "warm_start_transferred_layers", []),
+        ),
+    }
+    if metadata:
+        meta_dict.update(metadata)
+
+    try:
+        model.policy.to("cpu")
+        if hasattr(model.policy, "optimizer") and model.policy.optimizer is not None:
+            for state in model.policy.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, th.Tensor):
+                        state[k] = v.to("cpu")
+        model.save(str(path))
+
+        # Append metadata.json inside the zip
+        with zipfile.ZipFile(str(path), mode="a") as zf:
+            zf.writestr("metadata.json", json.dumps(meta_dict, indent=2))
+
+        # Also write companion .meta.json file alongside
+        meta_path = path.with_suffix(".meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_dict, f, indent=2)
+
+    finally:
+        model.policy.to(orig_device)
+        if hasattr(model.policy, "optimizer") and model.policy.optimizer is not None:
+            for state in model.policy.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, th.Tensor):
+                        state[k] = v.to(orig_device)
+
+
+def load_checkpoint(
+    path: str | Path,
+    env: GymEnv | None = None,
+    device: th.device | str = "auto",
+    expected_architecture: str | None = None,
+    architecture: str | None = None,
+) -> MaskableRecurrentPPO | Any:
+    """Load model checkpoint safely with explicit Checkpoint Guard against architecture and tensor shape mismatches."""
+    expected_arch = expected_architecture or architecture
+
+    ckpt_info = inspect_checkpoint(path)
+    ckpt_arch = ckpt_info["architecture_variant"]
+
+    # Checkpoint Guard: Fail explicitly on architecture mismatch
+    if expected_arch is not None and expected_arch != ckpt_arch:
+        raise ValueError(
+            f"Checkpoint architecture mismatch for '{path}':\n"
+            f"  Checkpoint was saved with architecture : '{ckpt_arch}'\n"
+            f"  Expected architecture                  : '{expected_arch}'\n"
+            f"Loading mismatched weights is prohibited to prevent silent partial loading or corrupted inference.\n"
+            f"To transfer compatible feature extractor weights instead, call transfer_compatible_weights()."
+        )
+
+    target_arch = expected_arch or ckpt_arch
+
+    # Determine device
+    if device == "auto":
+        if th.cuda.is_available():
+            target_device = th.device("cuda")
+        elif th.backends.mps.is_available():
+            target_device = th.device("mps")
+        else:
+            target_device = th.device("cpu")
+    else:
+        target_device = th.device(device)
+
+    custom_objects = {
+        "policy_class": RecurrentSpatialRescueCNN,
+        "policy_kwargs": {"architecture_variant": target_arch},
+    }
+
+    # Try MaskableRecurrentPPO first, then MaskablePPO
+    model = None
+    try:
+        model = MaskableRecurrentPPO.load(
+            str(path),
+            env=env,
+            device=target_device,
+            custom_objects=custom_objects,
+            expected_architecture=target_arch,
+        )
+    except Exception as e:
+        # If it was an explicit architecture mismatch error, re-raise!
+        if isinstance(e, (ValueError, RuntimeError)) and ("mismatch" in str(e) or "guard" in str(e)):
+            raise e
+        try:
+            from sb3_contrib import MaskablePPO
+            model = MaskablePPO.load(
+                str(path),
+                env=env,
+                device=target_device,
+                custom_objects=custom_objects,
+            )
+        except Exception:
+            raise e
+
+    # Tensor shape guard for MaskablePPO fallback if loaded
+    ckpt_state = ckpt_info["state_dict"]
+    model_state = model.policy.state_dict()
+    mismatches = []
+    for key, param in model_state.items():
+        if key not in ckpt_state:
+            mismatches.append(f"Missing key in checkpoint: {key}")
+        elif param.shape != ckpt_state[key].shape:
+            mismatches.append(
+                f"Shape mismatch for '{key}': model shape {param.shape} vs checkpoint shape {ckpt_state[key].shape}"
+            )
+    for key in ckpt_state.keys():
+        if key not in model_state:
+            mismatches.append(f"Unexpected key in checkpoint: {key}")
+
+    if mismatches:
+        raise RuntimeError(
+            f"Checkpoint weight shape guard failed for '{path}':\n"
+            + "\n".join(f"  - {m}" for m in mismatches)
+            + "\nSilent partial loading is prohibited!"
+        )
+
+    model.checkpoint_metadata = ckpt_info.get("metadata", {})
+    model.architecture_variant = target_arch
+    return model
+
+

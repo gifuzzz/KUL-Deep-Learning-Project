@@ -1,4 +1,7 @@
+import json
+import zipfile
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -170,14 +173,27 @@ class _DummyFeaturesExtractor(BaseFeaturesExtractor):
 class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
     """Recurrent Spatial Rescue CNN Policy with explicit recurrent state propagation and BPTT.
 
-    Architecture:
-      - Local Branch: Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 64, 3, pad=1) -> ReLU -> Conv2d(64, 8, 1) -> Flatten (1,800)
-      - Memory Branch (Zero MaxPool2d): Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 32, 3, stride=2, pad=1) -> ReLU -> Conv2d(32, 16, 1) -> Flatten (8,320)
-      - Agent Scalars: 5 features
-      - Previous Action: 7-dim one-hot vector
-      - Fusion: Linear(10,132, 128)
-      - Recurrence: GRU(128, 128)
-      - Output Heads: Separate 7-action masked policy head and scalar value head.
+    Architecture Variants:
+      1. Variant A ('baseline'):
+         - Local Branch: Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 64, 3, pad=1) -> ReLU -> Conv2d(64, 8, 1) -> Flatten (1,800)
+         - Memory Branch (Zero MaxPool2d): Conv2d(9, 32, 3, pad=1) -> ReLU -> Conv2d(32, 32, 3, stride=2, pad=1) -> ReLU -> Conv2d(32, 16, 1) -> Flatten (8,320)
+         - Agent Scalars: 5 features; Previous Action: 7-dim one-hot vector
+         - Fusion: Linear(10132, 128)
+         - Recurrence: GRU(128, 128)
+         - Output Heads: Linear(128, 7) policy head, Linear(128, 1) value head.
+         - Total params: 1,431,168
+      2. Variant B ('deep128'):
+         - Local & Memory Branches: Identical to baseline
+         - Fusion: Linear(10132, 256) -> LayerNorm(256) -> ReLU -> Linear(256, 128) -> ReLU
+         - Recurrence: GRU(128, 128)
+         - Output Heads: Linear(128, 7) policy head, Linear(128, 1) value head.
+         - Total params: 2,761,600
+      3. Variant C ('deep256'):
+         - Local & Memory Branches: Identical to baseline
+         - Fusion: Linear(10132, 512) -> LayerNorm(512) -> ReLU -> Linear(512, 256) -> ReLU
+         - Recurrence: GRU(256, 256) (hidden_size=256)
+         - Output Heads: Linear(256, 64) -> ReLU -> Linear(64, 7) policy head; Linear(256, 64) -> ReLU -> Linear(64, 1) value head.
+         - Total params: 5,782,656
     """
 
     def __init__(
@@ -205,11 +221,19 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         shared_lstm: bool = False,
         enable_critic_lstm: bool = False,
         lstm_kwargs: dict[str, Any] | None = None,
+        architecture_variant: str = "baseline",
     ):
         if action_space is None:
             action_space = spaces.Discrete(7)
         if lr_schedule is None:
             lr_schedule = lambda _: 3e-4
+
+        if architecture_variant not in ("baseline", "deep128", "deep256"):
+            raise ValueError(
+                f"Unknown architecture_variant: '{architecture_variant}'. "
+                f"Must be one of ['baseline', 'deep128', 'deep256']"
+            )
+        self.architecture_variant = str(architecture_variant)
 
         if isinstance(observation_space, spaces.Dict):
             space_dict = dict(observation_space.spaces)
@@ -219,8 +243,12 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
                 )
             observation_space = spaces.Dict(space_dict)
 
-        self.hidden_size = lstm_hidden_size or hidden_size
+        if self.architecture_variant == "deep256":
+            self.hidden_size = lstm_hidden_size or (256 if hidden_size == 128 else hidden_size)
+        else:
+            self.hidden_size = lstm_hidden_size or hidden_size
         self.lstm_output_dim = self.hidden_size
+        self.lstm_hidden_state_shape = (1, 1, self.hidden_size)
 
         ActorCriticPolicy.__init__(
             self,
@@ -242,6 +270,11 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
         )
+
+    @property
+    def total_params(self) -> int:
+        """Return total parameter count."""
+        return sum(p.numel() for p in self.parameters())
 
     def _build(self, lr_schedule: Schedule) -> None:
         self.features_extractor = nn.Identity()
@@ -299,10 +332,30 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
             + self.action_dim
         )
 
-        # Fusion: Linear(..., 128)
-        self.fusion = nn.Linear(total_fusion_dim, self.hidden_size)
+        # Fusion Branch based on architecture_variant:
+        if self.architecture_variant == "baseline":
+            # Variant A: Direct linear compression without non-linear depth
+            self.fusion = nn.Linear(total_fusion_dim, self.hidden_size)
+        elif self.architecture_variant == "deep128":
+            # Variant B: 2-stage projection with LayerNorm and ReLU
+            self.fusion = nn.Sequential(
+                nn.Linear(total_fusion_dim, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+            )
+        elif self.architecture_variant == "deep256":
+            # Variant C: 2-stage 512->256 projection with LayerNorm and ReLU
+            self.fusion = nn.Sequential(
+                nn.Linear(total_fusion_dim, 512),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                nn.Linear(512, 256),
+                nn.ReLU(),
+            )
 
-        # Recurrence: GRU(128, 128)
+        # Recurrence: GRU(hidden_size, hidden_size)
         self.gru = nn.GRU(
             input_size=self.hidden_size,
             hidden_size=self.hidden_size,
@@ -318,10 +371,22 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         # Masked action distribution
         self.action_dist = make_masked_proba_distribution(self.action_space)
 
-        # Output heads
-        self.action_net = nn.Linear(self.hidden_size, self.action_dim)
+        # Output heads based on architecture_variant:
+        if self.architecture_variant in ("baseline", "deep128"):
+            self.action_net = nn.Linear(self.hidden_size, self.action_dim)
+            self.value_net = nn.Linear(self.hidden_size, 1)
+        elif self.architecture_variant == "deep256":
+            self.action_net = nn.Sequential(
+                nn.Linear(self.hidden_size, 64),
+                nn.ReLU(),
+                nn.Linear(64, self.action_dim),
+            )
+            self.value_net = nn.Sequential(
+                nn.Linear(self.hidden_size, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+            )
         self.policy_head = self.action_net
-        self.value_net = nn.Linear(self.hidden_size, 1)
         self.value_head = self.value_net
 
         if self.ortho_init:
@@ -329,11 +394,21 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
                 self.local_cnn: np.sqrt(2),
                 self.memory_cnn: np.sqrt(2),
                 self.fusion: np.sqrt(2),
-                self.action_net: 0.01,
-                self.value_net: 1.0,
             }
             for module, gain in module_gains.items():
                 module.apply(partial(self.init_weights, gain=gain))
+
+            if isinstance(self.action_net, nn.Sequential):
+                self.action_net[0].apply(partial(self.init_weights, gain=np.sqrt(2)))
+                self.action_net[-1].apply(partial(self.init_weights, gain=0.01))
+            else:
+                self.action_net.apply(partial(self.init_weights, gain=0.01))
+
+            if isinstance(self.value_net, nn.Sequential):
+                self.value_net[0].apply(partial(self.init_weights, gain=np.sqrt(2)))
+                self.value_net[-1].apply(partial(self.init_weights, gain=1.0))
+            else:
+                self.value_net.apply(partial(self.init_weights, gain=1.0))
 
         self.optimizer = self.optimizer_class(
             self.parameters(),
@@ -391,9 +466,9 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
 
         if h.dim() == 2:
             h = h.unsqueeze(0)
-        if h.shape[1] != n_seq or h.device != device:
+        if h.shape[1] != n_seq or h.shape[2] != self.hidden_size or h.device != device:
             # Shape adjustment if necessary
-            if h.shape[1] == n_seq:
+            if h.shape[1] == n_seq and h.shape[2] == self.hidden_size:
                 h = h.to(device)
             else:
                 h = torch.zeros((1, n_seq, self.hidden_size), dtype=torch.float32, device=device)
@@ -768,3 +843,197 @@ class SpatialRescueFeaturesExtractor(BaseFeaturesExtractor):
         prev = self._encode_previous_action(observations.get("previous_action", None), b, dev)
         combined = torch.cat([loc, mem, ag, prev], dim=-1)
         return self.fusion(combined)
+
+
+def inspect_checkpoint(path: str | Path) -> dict[str, Any]:
+    """Inspect checkpoint file and determine its architecture variant and weight shapes.
+
+    Supports reading metadata.json, SB3 data payload, and policy.pth state dict.
+    Returns:
+        dict containing:
+          - path: str
+          - architecture_variant: str ('baseline', 'deep128', or 'deep256')
+          - hidden_size: int (128 or 256)
+          - metadata: dict
+          - policy_kwargs: dict
+          - total_params: int
+          - state_dict: dict[str, torch.Tensor]
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
+
+    metadata: dict[str, Any] = {}
+    policy_kwargs: dict[str, Any] = {}
+    state_dict: dict[str, torch.Tensor] = {}
+
+    with zipfile.ZipFile(str(path), mode="r") as zf:
+        namelist = zf.namelist()
+        if "metadata.json" in namelist:
+            try:
+                metadata = json.loads(zf.read("metadata.json").decode("utf-8"))
+            except Exception:
+                pass
+        if "data" in namelist:
+            try:
+                data = json.loads(zf.read("data").decode("utf-8"))
+                policy_kwargs = data.get("policy_kwargs", {}) or {}
+            except Exception:
+                pass
+        if "policy.pth" in namelist:
+            with zf.open("policy.pth") as f:
+                state_dict = torch.load(f, map_location="cpu", weights_only=False)
+
+    # Deducing architecture variant:
+    # 1. From metadata.json
+    arch = metadata.get("architecture_variant", None)
+    # 2. From policy_kwargs
+    if arch is None:
+        arch = policy_kwargs.get("architecture_variant", None)
+    # 3. Deduce from tensor keys and shapes in policy.pth
+    if arch is None and state_dict:
+        if "fusion.0.weight" in state_dict:
+            f0_shape = state_dict["fusion.0.weight"].shape
+            if f0_shape[0] == 512:
+                arch = "deep256"
+            elif f0_shape[0] == 256:
+                arch = "deep128"
+        elif "fusion.weight" in state_dict:
+            arch = "baseline"
+
+    if arch is None:
+        arch = "baseline"
+
+    hidden_size = 256 if arch == "deep256" else 128
+    alias_prefixes = ("lstm_actor.", "policy_head.", "value_head.")
+    total_params = metadata.get("total_params")
+    if total_params is None and state_dict:
+        total_params = sum(
+            p.numel()
+            for k, p in state_dict.items()
+            if not any(k.startswith(pfx) for pfx in alias_prefixes)
+        )
+
+    return {
+        "path": str(path),
+        "architecture_variant": str(arch),
+        "hidden_size": hidden_size,
+        "metadata": metadata,
+        "policy_kwargs": policy_kwargs,
+        "total_params": total_params,
+        "state_dict": state_dict,
+    }
+
+
+def transfer_compatible_weights(
+    source_model: Any,
+    target_model: Any,
+    compatible_layers: tuple[str, ...] = ("local_cnn", "memory_cnn"),
+) -> dict[str, Any]:
+    """Explicit utility function to transfer only identical layers between architecture variants.
+
+    Transfers identical layers (such as 'local_cnn' and 'memory_cnn') from source to target
+    while leaving differing layers (fusion, GRU, policy/value heads) untouched.
+    Records warm-start tracking attributes on target_model.
+
+    Args:
+        source_model: Source model, policy, checkpoint path, or state dict.
+        target_model: Target model or policy to receive the compatible weights.
+        compatible_layers: Tuple of layer names to transfer. Default: ("local_cnn", "memory_cnn").
+
+    Returns:
+        dict with transfer summary, transferred parameters count, and status.
+    """
+    # Extract source state dict
+    if isinstance(source_model, (str, Path)):
+        ckpt_info = inspect_checkpoint(source_model)
+        source_state = ckpt_info["state_dict"]
+        source_arch = ckpt_info["architecture_variant"]
+        source_desc = str(source_model)
+    elif hasattr(source_model, "policy"):
+        source_state = source_model.policy.state_dict()
+        source_arch = getattr(source_model.policy, "architecture_variant", "unknown")
+        source_desc = f"Model({source_arch})"
+    elif isinstance(source_model, nn.Module):
+        source_state = source_model.state_dict()
+        source_arch = getattr(source_model, "architecture_variant", "unknown")
+        source_desc = f"Policy({source_arch})"
+    elif isinstance(source_model, dict):
+        source_state = source_model
+        source_arch = "state_dict"
+        source_desc = "state_dict"
+    else:
+        raise TypeError(f"Unsupported source_model type: {type(source_model)}")
+
+    # Extract target policy
+    if hasattr(target_model, "policy"):
+        target_policy = target_model.policy
+        target_algo = target_model
+    elif isinstance(target_model, nn.Module):
+        target_policy = target_model
+        target_algo = None
+    else:
+        raise TypeError(f"Unsupported target_model type: {type(target_model)}")
+
+    target_arch = getattr(target_policy, "architecture_variant", "unknown")
+    target_state = target_policy.state_dict()
+
+    transferred_layers: list[str] = []
+    transferred_params: int = 0
+    skipped_layers: list[tuple[str, str]] = []
+
+    for layer_name in compatible_layers:
+        if not hasattr(target_policy, layer_name):
+            skipped_layers.append((layer_name, "missing in target"))
+            continue
+
+        prefix = f"{layer_name}."
+        layer_src_keys = [k for k in source_state.keys() if k.startswith(prefix)]
+        if not layer_src_keys:
+            skipped_layers.append((layer_name, "missing in source"))
+            continue
+
+        layer_params = 0
+        all_matched = True
+        for key in layer_src_keys:
+            if key not in target_state:
+                all_matched = False
+                skipped_layers.append((key, "key missing in target"))
+                break
+            src_tensor = source_state[key]
+            tgt_tensor = target_state[key]
+            if src_tensor.shape != tgt_tensor.shape:
+                all_matched = False
+                skipped_layers.append((key, f"shape mismatch: {src_tensor.shape} vs {tgt_tensor.shape}"))
+                break
+
+        if all_matched:
+            for key in layer_src_keys:
+                src_tensor = source_state[key]
+                target_state[key].copy_(
+                    src_tensor.to(device=target_state[key].device, dtype=target_state[key].dtype)
+                )
+                layer_params += src_tensor.numel()
+            transferred_layers.append(layer_name)
+            transferred_params += layer_params
+
+    is_warm = len(transferred_layers) > 0
+    setattr(target_policy, "is_warm_started", is_warm)
+    setattr(target_policy, "warm_start_source", source_desc)
+    setattr(target_policy, "warm_start_transferred_layers", transferred_layers)
+    if target_algo is not None:
+        setattr(target_algo, "is_warm_started", is_warm)
+        setattr(target_algo, "warm_start_source", source_desc)
+        setattr(target_algo, "warm_start_transferred_layers", transferred_layers)
+
+    return {
+        "status": "success" if is_warm else "no_layers_transferred",
+        "source_variant": source_arch,
+        "target_variant": target_arch,
+        "transferred_layers": transferred_layers,
+        "transferred_params": transferred_params,
+        "skipped_layers": skipped_layers,
+        "is_warm_started": is_warm,
+        "warm_start_source": source_desc,
+    }
+
