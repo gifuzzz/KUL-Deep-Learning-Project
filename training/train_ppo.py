@@ -61,6 +61,8 @@ def save_checkpoint(
     git commit, hyperparameters) into the checkpoint zip and companion JSON file.
     """
     path = Path(path)
+    if "stage1_qualified.zip" in str(path) and path.exists():
+        raise RuntimeError("stage1_qualified.zip is immutable and cannot be overwritten!")
     path.parent.mkdir(parents=True, exist_ok=True)
     orig_device = model.device
 
@@ -155,32 +157,51 @@ def load_checkpoint(
 
 
 class CurriculumRescueEnv(RescueEnv):
-    """Mixed Visibility Curriculum Environment.
+    """Progressive Mixed-Visibility Curriculum Environment.
 
     Stage 1 (Qualification Gate):
-      - 70% near/visible victims (max_steps=64, victim_distance=2, min_victim_distance=1)
-      - 30% medium/hidden victims (max_steps=128, victim_distance=6, min_victim_distance=3)
+      - near_ratio% near/visible victims (max_steps=64, victim_distance=2, min_victim_distance=1)
+      - (1 - near_ratio)% medium/hidden victims (max_steps=128, victim_distance=6, min_victim_distance=3)
 
-    Stage 2 (Distant Search):
-      - 30% visible victims (max_steps=128, victim_distance=2, min_victim_distance=1)
-      - 70% hidden multi-room victims (max_steps=384, victim_distance=None, min_victim_distance=1)
+    Stage 2 (Staged Progression with Near-Rescue Retention):
+      - Substage '2A' (Medium Bridge):
+          30% Near (d=2, max_steps=64)
+          50% Medium (d=6, min_dist=3, max_steps=128)
+          20% Distant (d=None, max_steps=256)
+      - Substage '2B' (Distant Search):
+          20% Near (d=2, max_steps=64)
+          30% Medium (d=6, min_dist=3, max_steps=128)
+          50% Distant (d=None, max_steps=384)
+      - Substage '2C' (Distant Mastery):
+          10% Near (d=2, max_steps=64)
+          20% Medium (d=6, min_dist=3, max_steps=128)
+          70% Distant (d=None, max_steps=384)
+      - Substage 'reinforce_near' (Healing mode when prerequisite near retention drops):
+          60% Near (d=2, max_steps=64)
+          30% Medium (d=6, min_dist=3, max_steps=128)
+          10% Distant (d=None, max_steps=256)
     """
 
-    def __init__(self, stage: int = 1, near_ratio: float = 0.70, **kwargs):
+    def __init__(self, stage: int = 1, near_ratio: float = 0.70, substage: str = "2A", **kwargs):
         super().__init__(**kwargs)
         self.stage = int(stage)
         self.near_ratio = float(near_ratio)
+        self.substage = str(substage)
 
-    def set_stage(self, stage: int, near_ratio: float | None = None) -> None:
+    def set_stage(self, stage: int, near_ratio: float | None = None, substage: str | None = None) -> None:
         self.stage = int(stage)
         if near_ratio is not None:
             self.near_ratio = float(near_ratio)
+        if substage is not None:
+            self.substage = str(substage)
 
     def reset(self, *, seed=None, options=None):
         if options and "stage" in options:
             self.stage = int(options["stage"])
         if options and "near_ratio" in options:
             self.near_ratio = float(options["near_ratio"])
+        if options and "substage" in options:
+            self.substage = str(options["substage"])
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
@@ -195,24 +216,69 @@ class CurriculumRescueEnv(RescueEnv):
                 self.min_victim_distance = 3
                 self.max_steps = 128
         else:
-            if roll < 0.30:
-                self.victim_distance = 2
-                self.min_victim_distance = 1
-                self.max_steps = 128
-            else:
-                self.victim_distance = None
-                self.min_victim_distance = 1
-                self.max_steps = 384
+            # Stage 2 Staged Progression
+            if self.substage == "reinforce_near":
+                if roll < 0.60:
+                    self.victim_distance = 2
+                    self.min_victim_distance = 1
+                    self.max_steps = 64
+                elif roll < 0.90:
+                    self.victim_distance = 6
+                    self.min_victim_distance = 3
+                    self.max_steps = 128
+                else:
+                    self.victim_distance = None
+                    self.min_victim_distance = 1
+                    self.max_steps = 256
+            elif self.substage == "2A":
+                if roll < 0.30:
+                    self.victim_distance = 2
+                    self.min_victim_distance = 1
+                    self.max_steps = 64
+                elif roll < 0.80:
+                    self.victim_distance = 6
+                    self.min_victim_distance = 3
+                    self.max_steps = 128
+                else:
+                    self.victim_distance = None
+                    self.min_victim_distance = 1
+                    self.max_steps = 256
+            elif self.substage == "2B":
+                if roll < 0.20:
+                    self.victim_distance = 2
+                    self.min_victim_distance = 1
+                    self.max_steps = 64
+                elif roll < 0.50:
+                    self.victim_distance = 6
+                    self.min_victim_distance = 3
+                    self.max_steps = 128
+                else:
+                    self.victim_distance = None
+                    self.min_victim_distance = 1
+                    self.max_steps = 384
+            else:  # "2C" Distant Mastery
+                if roll < 0.10:
+                    self.victim_distance = 2
+                    self.min_victim_distance = 1
+                    self.max_steps = 64
+                elif roll < 0.30:
+                    self.victim_distance = 6
+                    self.min_victim_distance = 3
+                    self.max_steps = 128
+                else:
+                    self.victim_distance = None
+                    self.min_victim_distance = 1
+                    self.max_steps = 384
 
         return super().reset(seed=seed, options=options)
 
 
-def set_env_stage(env: Any, stage: int, near_ratio: float | None = None) -> None:
-    """Set curriculum stage and optional near victim ratio across single or vectorized environments."""
+def set_env_stage(env: Any, stage: int, near_ratio: float | None = None, substage: str | None = None) -> None:
+    """Set curriculum stage, near ratio, and progressive substage across vectorized environments."""
     if hasattr(env, "env_method"):
-        env.env_method("set_stage", stage, near_ratio)
+        env.env_method("set_stage", stage, near_ratio, substage)
     elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "set_stage"):
-        env.unwrapped.set_stage(stage, near_ratio)
+        env.unwrapped.set_stage(stage, near_ratio, substage)
 
 
 def make_single_train_env(
@@ -220,6 +286,7 @@ def make_single_train_env(
     reward_shaping: bool = True,
     navigation_shaping: bool = False,
     near_ratio: float = 0.70,
+    substage: str = "2A",
     seed: int | None = None,
 ):
     """Factory creating an individual monitored environment."""
@@ -229,6 +296,7 @@ def make_single_train_env(
             reward_shaping=reward_shaping,
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
+            substage=substage,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -243,6 +311,7 @@ def make_train_env(
     reward_shaping: bool = True,
     navigation_shaping: bool = False,
     near_ratio: float = 0.70,
+    substage: str = "2A",
     n_envs: int = 8,
     base_seed: int = 42,
 ) -> DummyVecEnv | Monitor:
@@ -253,6 +322,7 @@ def make_train_env(
             reward_shaping=reward_shaping,
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
+            substage=substage,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -263,6 +333,7 @@ def make_train_env(
             reward_shaping=reward_shaping,
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
+            substage=substage,
             seed=base_seed + i * 1000,
         )
         for i in range(n_envs)
@@ -296,6 +367,7 @@ def evaluate_unshaped(
     """Evaluate model with unshaped rewards using proper recurrent state handling."""
     rewards = []
     successes = []
+    pickups = []
     lengths = []
 
     for ep in range(n_episodes):
@@ -307,6 +379,7 @@ def evaluate_unshaped(
         done = False
         ep_reward = 0.0
         steps = 0
+        ever_picked_up = False
         gru_states = None
         episode_starts = np.ones((1,), dtype=bool)
 
@@ -324,63 +397,240 @@ def evaluate_unshaped(
             steps += 1
             done = terminated or truncated
 
+            carrying = any(
+                v["carried_by"] == 0 and not v["dead"] and not v["rescued"]
+                for v in eval_env.unwrapped.sim.victims
+            )
+            if carrying:
+                ever_picked_up = True
+
+        is_succ = bool(info.get("success", False))
         rewards.append(ep_reward)
         lengths.append(steps)
-        successes.append(bool(info.get("success", False)))
+        successes.append(is_succ)
+        pickups.append(ever_picked_up or is_succ)
 
     return {
         "mean_reward": float(np.mean(rewards)),
         "std_reward": float(np.std(rewards)),
         "success_rate": float(np.mean(successes)),
+        "pickup_rate": float(np.mean(pickups)),
         "mean_length": float(np.mean(lengths)),
     }
 
 
 class RecurrentMaskableEvalCallback(BaseCallback):
-    """Periodic evaluation callback supporting recurrent hidden state and action masks."""
+    """Periodic evaluation callback supporting recurrent hidden state, action masks,
+
+    strict improvement checking, immutable qualified stage preservation, separate
+    latest_model.zip saving, and adaptive curriculum management.
+    """
 
     def __init__(
         self,
-        eval_env: RescueEnv,
+        eval_env_stage2: RescueEnv | PreviousActionWrapper,
+        eval_env_near: RescueEnv | PreviousActionWrapper | None = None,
+        eval_env_med: RescueEnv | PreviousActionWrapper | None = None,
+        train_env: Any = None,
         best_model_save_path: str | Path | None = None,
         eval_freq: int = 10000,
         n_eval_episodes: int = 20,
         deterministic: bool = True,
+        hyperparameters: dict[str, Any] | None = None,
+        seed_start: int = 50000,
         verbose: int = 1,
     ):
         super().__init__(verbose=verbose)
-        self.eval_env = eval_env
+        self.eval_env_stage2 = eval_env_stage2
+        self.eval_env_near = eval_env_near
+        self.eval_env_med = eval_env_med
+        self.train_env = train_env
         self.best_model_save_path = Path(best_model_save_path) if best_model_save_path else None
         self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
         self.deterministic = deterministic
+        self.hyperparameters = hyperparameters or {}
+        self.seed_start = seed_start
+
+        # Best metric tracking for strict improvement
+        self.best_s2_success = 0.0
+        self.best_near_retention = 0.0
+        self.best_s2_pickup = 0.0
         self.best_mean_reward = -float("inf")
-        self.best_success_rate = -1.0
+        self.best_mean_length = float("inf")
+        self.has_saved_best = False
         self.last_eval_step = 0
+        self.current_substage = "2A"
+
+    def _is_strictly_better(
+        self,
+        s2_succ: float,
+        near_succ: float,
+        s2_pick: float,
+        mean_rew: float,
+        mean_len: float,
+    ) -> bool:
+        """Strict improvement evaluation policy with explicit tie-breaking."""
+        # 1. Primary metric: Stage 2 hidden-victim rescue success (S_2 > 0)
+        if s2_succ > 0.0:
+            if s2_succ > self.best_s2_success:
+                return True
+            if s2_succ == self.best_s2_success:
+                # 2. Secondary metric: Near-rescue retention
+                if near_succ > self.best_near_retention:
+                    return True
+                if near_succ == self.best_near_retention:
+                    # 3. Tertiary metric: Distant pickup rate
+                    if s2_pick > self.best_s2_pickup:
+                        return True
+                    if s2_pick == self.best_s2_pickup:
+                        # 4. Quaternary metric: Combined mean reward
+                        if mean_rew > self.best_mean_reward + 0.05:
+                            return True
+                        if np.isclose(mean_rew, self.best_mean_reward, atol=0.05):
+                            # 5. Quinary metric: Shorter average steps
+                            return mean_len < self.best_mean_length - 2.0
+            return False
+
+        # 2. Early Phase (S_2 == 0.0): Track exploration progress on pickups
+        # Only allow saving exploratory best IF near retention is solidly preserved (>= 80%)
+        if self.best_s2_success == 0.0 and near_succ >= 0.80:
+            if s2_pick > self.best_s2_pickup and s2_pick > 0.0:
+                return True
+            if s2_pick == self.best_s2_pickup and s2_pick > 0.0:
+                if near_succ > self.best_near_retention:
+                    return True
+                if near_succ == self.best_near_retention and mean_rew > self.best_mean_reward + 0.10:
+                    return True
+
+        return False
 
     def _on_step(self) -> bool:
         if self.eval_freq > 0 and (self.num_timesteps - self.last_eval_step >= self.eval_freq):
             self.last_eval_step = self.num_timesteps
-            metrics = evaluate_unshaped(
+
+            # 1. Evaluate Distant (Stage 2 primary target)
+            s2_metrics = evaluate_unshaped(
                 self.model,
-                self.eval_env,
+                self.eval_env_stage2,
                 n_episodes=self.n_eval_episodes,
                 deterministic=self.deterministic,
-                seed_start=30000 + self.num_timesteps,
+                seed_start=self.seed_start,
             )
+
+            # 2. Evaluate Near (retention check)
+            if self.eval_env_near is not None:
+                near_metrics = evaluate_unshaped(
+                    self.model,
+                    self.eval_env_near,
+                    n_episodes=self.n_eval_episodes,
+                    deterministic=self.deterministic,
+                    seed_start=self.seed_start,
+                )
+            else:
+                near_metrics = {"success_rate": 1.0, "pickup_rate": 1.0, "mean_reward": 10.0, "mean_length": 3.0}
+
+            # 3. Evaluate Medium (bridge check)
+            if self.eval_env_med is not None:
+                med_metrics = evaluate_unshaped(
+                    self.model,
+                    self.eval_env_med,
+                    n_episodes=self.n_eval_episodes,
+                    deterministic=self.deterministic,
+                    seed_start=self.seed_start,
+                )
+            else:
+                med_metrics = {"success_rate": 0.0, "pickup_rate": 0.0, "mean_reward": 0.0, "mean_length": 64.0}
+
+            combined_reward = (s2_metrics["mean_reward"] + near_metrics["mean_reward"]) / 2.0
+            combined_length = s2_metrics["mean_length"]
+
             if self.verbose > 0:
                 print(
-                    f"\n[Eval @ {self.num_timesteps} steps] "
-                    f"Mean Reward: {metrics['mean_reward']:.3f} | "
-                    f"Success Rate: {metrics['success_rate'] * 100:.1f}% | "
-                    f"Avg Steps: {metrics['mean_length']:.1f}"
+                    f"\n[Eval @ {self.num_timesteps} steps] Substage: {self.current_substage} | "
+                    f"Distant Succ: {s2_metrics['success_rate']*100:.1f}% (Pick: {s2_metrics['pickup_rate']*100:.1f}%) | "
+                    f"Near Ret: {near_metrics['success_rate']*100:.1f}% | "
+                    f"Med Succ: {med_metrics['success_rate']*100:.1f}% | "
+                    f"Mean Rew: {combined_reward:.3f}"
                 )
-            if self.best_model_save_path and metrics["success_rate"] >= self.best_success_rate:
-                self.best_mean_reward = metrics["mean_reward"]
-                self.best_success_rate = metrics["success_rate"]
-                save_checkpoint(self.model, self.best_model_save_path / "best_model.zip")
+
+            # Unconditionally save latest_model.zip separately
+            if self.best_model_save_path:
+                latest_path = self.best_model_save_path / "latest_model.zip"
+                save_checkpoint(
+                    self.model,
+                    latest_path,
+                    metadata={
+                        "evaluation_step": self.num_timesteps,
+                        "substage": self.current_substage,
+                        "distant_success_rate": s2_metrics["success_rate"],
+                        "distant_pickup_rate": s2_metrics["pickup_rate"],
+                        "near_retention_rate": near_metrics["success_rate"],
+                        "medium_success_rate": med_metrics["success_rate"],
+                        "mean_reward": combined_reward,
+                        "seed_set": f"{self.seed_start}..{self.seed_start + self.n_eval_episodes - 1}",
+                        "training_hyperparameters": self.hyperparameters,
+                        "checkpoint_type": "latest_model",
+                    },
+                )
+
+            # Check strict improvement for best_model.zip
+            if self.best_model_save_path and self._is_strictly_better(
+                s2_metrics["success_rate"],
+                near_metrics["success_rate"],
+                s2_metrics["pickup_rate"],
+                combined_reward,
+                combined_length,
+            ):
+                self.best_s2_success = s2_metrics["success_rate"]
+                self.best_near_retention = near_metrics["success_rate"]
+                self.best_s2_pickup = s2_metrics["pickup_rate"]
+                self.best_mean_reward = combined_reward
+                self.best_mean_length = combined_length
+                self.has_saved_best = True
+
+                best_path = self.best_model_save_path / "best_model.zip"
+                save_checkpoint(
+                    self.model,
+                    best_path,
+                    metadata={
+                        "evaluation_step": self.num_timesteps,
+                        "substage": self.current_substage,
+                        "distant_success_rate": s2_metrics["success_rate"],
+                        "distant_pickup_rate": s2_metrics["pickup_rate"],
+                        "near_retention_rate": near_metrics["success_rate"],
+                        "medium_success_rate": med_metrics["success_rate"],
+                        "mean_reward": combined_reward,
+                        "seed_set": f"{self.seed_start}..{self.seed_start + self.n_eval_episodes - 1}",
+                        "training_hyperparameters": self.hyperparameters,
+                        "checkpoint_type": "best_model",
+                    },
+                )
                 if self.verbose > 0:
-                    print(f"New best model saved to {self.best_model_save_path / 'best_model.zip'}")
+                    print(
+                        f"*** STRICT IMPROVEMENT DETECTED! New best model saved to {best_path} "
+                        f"(Distant Succ: {self.best_s2_success*100:.1f}%, Near Ret: {self.best_near_retention*100:.1f}%)"
+                    )
+
+            # Adaptive Curriculum Self-Healing & Progression
+            if self.train_env is not None:
+                if near_metrics["success_rate"] < 0.80 and self.current_substage != "reinforce_near":
+                    self.current_substage = "reinforce_near"
+                    set_env_stage(self.train_env, stage=2, substage="reinforce_near")
+                    if self.verbose > 0:
+                        print(">>> Curriculum Alert: Near retention dropped below 80%. Shifting to 'reinforce_near' mode.")
+                elif near_metrics["success_rate"] >= 0.85:
+                    if self.current_substage in ("2A", "reinforce_near") and med_metrics["success_rate"] >= 0.40:
+                        self.current_substage = "2B"
+                        set_env_stage(self.train_env, stage=2, substage="2B")
+                        if self.verbose > 0:
+                            print(">>> Curriculum Milestone: Near retention >= 85% and Medium success >= 40%. Advancing to Substage 2B.")
+                    elif self.current_substage == "2B" and med_metrics["success_rate"] >= 0.60 and s2_metrics["success_rate"] >= 0.15:
+                        self.current_substage = "2C"
+                        set_env_stage(self.train_env, stage=2, substage="2C")
+                        if self.verbose > 0:
+                            print(">>> Curriculum Milestone: Advancing to Substage 2C (Full Distant Mastery).")
+
         return True
 
 
@@ -593,12 +843,19 @@ def main():
             stage1_dir = save_dir / "stage1"
             stage1_dir.mkdir(parents=True, exist_ok=True)
 
+            eval_env_near = make_eval_env(victim_distance=2, max_steps=64)
+            eval_env_med = make_eval_env(victim_distance=6, max_steps=128)
             callback1 = RecurrentMaskableEvalCallback(
-                eval_env=eval_env,
+                eval_env_stage2=eval_env_near,
+                eval_env_near=eval_env_near,
+                eval_env_med=eval_env_med,
+                train_env=train_env,
                 best_model_save_path=stage1_dir,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.n_eval_episodes,
                 deterministic=True,
+                hyperparameters=hyperparameters,
+                seed_start=40000,
             )
 
             print(f"--- Stage 1: Near-Rescue Mastery ({stage1_steps} steps, {int(args.near_ratio*100)}% near victims) ---")
@@ -609,6 +866,8 @@ def main():
                 tb_log_name="PPO_Curriculum_Stage1",
                 reset_num_timesteps=False,
             )
+            eval_env_near.close()
+            eval_env_med.close()
 
             stage1_final = stage1_dir / "stage1_final.zip"
             save_checkpoint(
@@ -642,17 +901,25 @@ def main():
         # ---------------- STAGE 2 ----------------
         if stage2_steps > 0:
             print(f"\n>>> Starting Stage 2: Distant Search ({stage2_steps} steps, {args.n_envs} envs)")
-            set_env_stage(train_env, stage=2)
+            set_env_stage(train_env, stage=2, substage="2A")
             stage2_dir = save_dir / "stage2"
             stage2_dir.mkdir(parents=True, exist_ok=True)
 
             eval_env_stage2 = make_eval_env(victim_distance=None, max_steps=384)
+            eval_env_near = make_eval_env(victim_distance=2, max_steps=64)
+            eval_env_med = make_eval_env(victim_distance=6, max_steps=128)
+
             callback2 = RecurrentMaskableEvalCallback(
-                eval_env=eval_env_stage2,
+                eval_env_stage2=eval_env_stage2,
+                eval_env_near=eval_env_near,
+                eval_env_med=eval_env_med,
+                train_env=train_env,
                 best_model_save_path=stage2_dir,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.n_eval_episodes,
                 deterministic=True,
+                hyperparameters=hyperparameters,
+                seed_start=50000,
             )
 
             model.learn(
@@ -662,6 +929,8 @@ def main():
                 reset_num_timesteps=False,
             )
             eval_env_stage2.close()
+            eval_env_near.close()
+            eval_env_med.close()
 
             stage2_final = stage2_dir / "stage2_final.zip"
             save_checkpoint(

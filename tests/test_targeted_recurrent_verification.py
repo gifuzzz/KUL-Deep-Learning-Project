@@ -463,8 +463,8 @@ def test_test6_fixed_scenario_overfitting():
         n_steps=32,
         batch_size=32,
         n_epochs=5,
-        learning_rate=2e-3,
-        ent_coef=0.03,
+        learning_rate=1e-3,
+        ent_coef=0.01,
         device="cpu",
         seed=42,
     )
