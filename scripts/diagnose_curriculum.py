@@ -256,6 +256,13 @@ if __name__ == "__main__":
         default="all",
         help="Evaluation tiers: all (2, 6, 8, 10, 12, Distant), legacy (2, 6, Distant), or bridge (8, 10, 12)",
     )
+    parser.add_argument(
+        "--architecture",
+        type=str,
+        default=None,
+        choices=["baseline", "deep128", "deep256"],
+        help="Optional architecture variant override",
+    )
     parser.add_argument("--output-json", type=str, default=None)
     args = parser.parse_args()
 
