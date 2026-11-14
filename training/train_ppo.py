@@ -138,7 +138,7 @@ class CurriculumRescueEnv(RescueEnv):
             self.active_bridge = "bridge_b"
         elif substage == "2C_bridge12":
             self.active_bridge = "bridge_c"
-        elif substage == "2C_distant":
+        elif substage in ("2C_distant", "2D_balanced"):
             self.active_bridge = "bridge_c"
 
     def _apply_tier_config(self, tier_name: str) -> None:
@@ -219,17 +219,30 @@ class CurriculumRescueEnv(RescueEnv):
                     self._apply_tier_config("bridge_b")
                 else:
                     self._apply_tier_config("bridge_c")
-            elif self.substage == "2C_distant":
-                if roll < 0.10:
-                    self._apply_tier_config("near")
-                elif roll < 0.25:
-                    self._apply_tier_config("medium")
-                elif roll < 0.375:
-                    self._apply_tier_config("bridge_b")
-                elif roll < 0.50:
-                    self._apply_tier_config("bridge_c")
+            elif self.substage in ("2C_distant", "2D_balanced"):
+                if self.substage == "2D_balanced":
+                    # Balanced Stage 2D Retention: 20% near, 30% medium, 12.5% bridge_b, 12.5% bridge_c, 25% distant
+                    if roll < 0.20:
+                        self._apply_tier_config("near")
+                    elif roll < 0.50:
+                        self._apply_tier_config("medium")
+                    elif roll < 0.625:
+                        self._apply_tier_config("bridge_b")
+                    elif roll < 0.75:
+                        self._apply_tier_config("bridge_c")
+                    else:
+                        self._apply_tier_config("distant")
                 else:
-                    self._apply_tier_config("distant")
+                    if roll < 0.10:
+                        self._apply_tier_config("near")
+                    elif roll < 0.25:
+                        self._apply_tier_config("medium")
+                    elif roll < 0.375:
+                        self._apply_tier_config("bridge_b")
+                    elif roll < 0.50:
+                        self._apply_tier_config("bridge_c")
+                    else:
+                        self._apply_tier_config("distant")
             else:
                 # Fallback to 2C_bridge8
                 if roll < 0.20:
@@ -799,7 +812,7 @@ class RecurrentMaskableEvalCallback(BaseCallback):
 
             # Adaptive Curriculum Self-Healing & Progression
             if self.train_env is not None:
-                if self.stage == "2C" or str(self.current_substage).startswith("2C_") or self.current_substage in ("reinforce_near", "reinforce_medium"):
+                if self.stage == "2C" or str(self.current_substage).startswith(("2C_", "2D_")) or self.current_substage in ("reinforce_near", "reinforce_medium"):
                     near_succ = near_metrics["success_rate"]
                     med_succ = med_metrics["success_rate"]
                     a_succ = bridge_a_metrics["success_rate"] if bridge_a_metrics else 0.0
@@ -1084,6 +1097,18 @@ def parse_args():
         help="Initial checkpoint path to load",
     )
     parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=None,
+        help="Target KL divergence threshold for early stopping (default: None)",
+    )
+    parser.add_argument(
+        "--initial-substage",
+        type=str,
+        default=None,
+        help="Initial substage for Stage 2C/2D (e.g. 2C_distant, 2D_balanced)",
+    )
+    parser.add_argument(
         "--skip-qualification-gate",
         action="store_true",
         help="Skip strict >=90%% qualification gate failure check (useful for test runs)",
@@ -1173,6 +1198,13 @@ def main():
     if args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")
         model = load_checkpoint(args.checkpoint, env=train_env, device=device, expected_architecture=args.architecture)
+        if args.learning_rate is not None:
+            model.learning_rate = args.learning_rate
+            model.lr_schedule = lambda _: args.learning_rate
+            for pg in model.policy.optimizer.param_groups:
+                pg["lr"] = args.learning_rate
+        if args.target_kl is not None:
+            model.target_kl = args.target_kl
     else:
         model = MaskableRecurrentPPO(
             policy=RecurrentSpatialRescueCNN,
@@ -1184,6 +1216,7 @@ def main():
             n_epochs=args.n_epochs,
             gamma=args.gamma,
             ent_coef=args.ent_coef,
+            target_kl=args.target_kl,
             verbose=1,
             device=device,
             tensorboard_log="./logs/",
@@ -1299,7 +1332,8 @@ def main():
         # ---------------- STAGE 2C ----------------
         if stage2c_steps > 0:
             print(f"\n>>> Starting Stage 2C: Distance Bridge Curriculum ({stage2c_steps} steps, {args.n_envs} envs)")
-            set_env_stage(train_env, stage="2C", substage="2C_bridge8")
+            initial_sub = args.initial_substage or "2C_bridge8"
+            set_env_stage(train_env, stage="2C", substage=initial_sub)
             stage2c_dir = save_dir / "stage2c"
             stage2c_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1319,7 +1353,7 @@ def main():
                 eval_env_bridge_c=eval_env_bridge_c,
                 train_env=train_env,
                 stage="2C",
-                initial_substage="2C_bridge8",
+                initial_substage=initial_sub,
                 best_model_save_path=stage2c_dir,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.n_eval_episodes,
