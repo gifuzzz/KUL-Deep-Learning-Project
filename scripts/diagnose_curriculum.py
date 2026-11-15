@@ -75,6 +75,9 @@ def evaluate_tier(
     deterministic: bool = True,
     device: str = "cpu",
     min_victim_distance: int = 1,
+    geometry_reveal_fraction: float = 0.0,
+    reveal_victim: bool = False,
+    observability_stage: str = "A",
 ) -> dict[str, float]:
     env = RescueEnv(
         victim_distance=victim_distance,
@@ -82,6 +85,9 @@ def evaluate_tier(
         max_steps=max_steps,
         reward_shaping=False,
         navigation_shaping=False,
+        geometry_reveal_fraction=geometry_reveal_fraction,
+        reveal_victim=reveal_victim,
+        observability_stage=observability_stage,
     )
     env = PreviousActionWrapper(env)
 
@@ -174,7 +180,20 @@ def evaluate_tier(
 
 
 def _eval_worker(task):
-    model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, deterministic, device = task
+    (
+        model_path,
+        tier_name,
+        dist,
+        min_dist,
+        max_s,
+        n_episodes,
+        seed_start,
+        deterministic,
+        device,
+        geom_frac,
+        rev_vict,
+        obs_stg,
+    ) = task
     dummy_env = make_eval_env(victim_distance=2, max_steps=64)
     model = load_checkpoint(model_path, env=dummy_env, device=device)
     dummy_env.close()
@@ -187,6 +206,9 @@ def _eval_worker(task):
         seed_start=seed_start,
         deterministic=deterministic,
         device=device,
+        geometry_reveal_fraction=geom_frac,
+        reveal_victim=rev_vict,
+        observability_stage=obs_stg,
     )
     mode_str = "deterministic" if deterministic else "stochastic"
     print(
@@ -206,6 +228,9 @@ def run_full_diagnosis(
     preset: str = "all",
     tiers: list[tuple[str, int | None, int, int]] | None = None,
     workers: int = 1,
+    geometry_reveal_fraction: float = 0.0,
+    reveal_victim: bool = False,
+    observability_stage: str = "A",
 ) -> dict:
     if tiers is None:
         if preset == "legacy":
@@ -218,8 +243,8 @@ def run_full_diagnosis(
     if workers > 1:
         tasks = []
         for tier_name, dist, min_dist, max_s in tiers:
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device))
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device, geometry_reveal_fraction, reveal_victim, observability_stage))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device, geometry_reveal_fraction, reveal_victim, observability_stage))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             worker_results = list(executor.map(_eval_worker, tasks))
         results = {tier[0]: {} for tier in tiers}
@@ -242,6 +267,9 @@ def run_full_diagnosis(
             seed_start=seed_start,
             deterministic=True,
             device=device,
+            geometry_reveal_fraction=geometry_reveal_fraction,
+            reveal_victim=reveal_victim,
+            observability_stage=observability_stage,
         )
         print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%", flush=True)
         stoch = evaluate_tier(
@@ -253,6 +281,9 @@ def run_full_diagnosis(
             seed_start=seed_start,
             deterministic=False,
             device=device,
+            geometry_reveal_fraction=geometry_reveal_fraction,
+            reveal_victim=reveal_victim,
+            observability_stage=observability_stage,
         )
         print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%", flush=True)
         results[tier_name] = {
@@ -306,7 +337,45 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument("--workers", type=int, default=1, help="Parallel worker processes for tiers (default: 1)")
+    parser.add_argument(
+        "--geometry-reveal-fraction",
+        type=float,
+        default=0.0,
+        help="Initial building geometry revealed (0.0 to 1.0, default: 0.0)",
+    )
+    parser.add_argument(
+        "--reveal-victim",
+        action="store_true",
+        help="Reveal victim location in memory map at episode start (default: False)",
+    )
+    parser.add_argument(
+        "--observability-stage",
+        choices=["B1", "B2", "B3a", "B3b", "B3c", "B4", "A"],
+        default=None,
+        help="Set observability visibility according to stage preset",
+    )
     args = parser.parse_args()
+
+    if args.observability_stage:
+        stg = args.observability_stage.upper()
+        if stg == "B1":
+            args.geometry_reveal_fraction = 1.0
+            args.reveal_victim = True
+        elif stg == "B2":
+            args.geometry_reveal_fraction = 1.0
+            args.reveal_victim = False
+        elif stg == "B3A":
+            args.geometry_reveal_fraction = 0.75
+            args.reveal_victim = False
+        elif stg == "B3B":
+            args.geometry_reveal_fraction = 0.50
+            args.reveal_victim = False
+        elif stg == "B3C":
+            args.geometry_reveal_fraction = 0.25
+            args.reveal_victim = False
+        elif stg in ("B4", "A"):
+            args.geometry_reveal_fraction = 0.0
+            args.reveal_victim = False
 
     res = run_full_diagnosis(
         args.model,
@@ -315,6 +384,9 @@ if __name__ == "__main__":
         seed_start=args.seed_start,
         preset=args.tier,
         workers=args.workers,
+        geometry_reveal_fraction=args.geometry_reveal_fraction,
+        reveal_victim=args.reveal_victim,
+        observability_stage=args.observability_stage or "A",
     )
     print_table(res, args.model)
     if args.output_json:

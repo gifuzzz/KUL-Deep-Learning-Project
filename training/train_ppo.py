@@ -120,7 +120,15 @@ class CurriculumRescueEnv(RescueEnv):
           25% Bridge (active bridge tier: Bridge A / B / C)
     """
 
-    def __init__(self, stage: int | str = 1, near_ratio: float = 0.70, substage: str = "2A", **kwargs):
+    def __init__(
+        self,
+        stage: int | str = 1,
+        near_ratio: float = 0.70,
+        substage: str = "2A",
+        observability_mode: str = "A",
+        observability_stage: str = "B1",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.stage = normalize_stage(stage)
         self.near_ratio = float(near_ratio)
@@ -130,6 +138,8 @@ class CurriculumRescueEnv(RescueEnv):
         else:
             self.substage = str(substage)
         self._update_active_bridge(self.substage)
+        self.observability_mode = str(observability_mode).upper()
+        self.observability_stage = str(observability_stage).upper()
 
     def _update_active_bridge(self, substage: str) -> None:
         if substage == "2C_bridge8":
@@ -158,14 +168,26 @@ class CurriculumRescueEnv(RescueEnv):
             self.substage = "2C_bridge8"
             self._update_active_bridge(self.substage)
 
+    def set_observability_stage(self, stage: str) -> None:
+        self.observability_stage = str(stage).upper()
+
     def reset(self, *, seed=None, options=None):
-        if options and "stage" in options:
+        if options is None:
+            options = {}
+        else:
+            options = dict(options)
+
+        if "stage" in options:
             self.stage = normalize_stage(options["stage"])
-        if options and "near_ratio" in options:
+        if "near_ratio" in options:
             self.near_ratio = float(options["near_ratio"])
-        if options and "substage" in options:
+        if "substage" in options:
             self.substage = str(options["substage"])
             self._update_active_bridge(self.substage)
+        if "observability_mode" in options:
+            self.observability_mode = str(options["observability_mode"]).upper()
+        if "observability_stage" in options:
+            self.observability_stage = str(options["observability_stage"]).upper()
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
@@ -306,6 +328,61 @@ class CurriculumRescueEnv(RescueEnv):
                     self.min_victim_distance = 1
                     self.max_steps = 384
 
+        # Observability Configuration (Experiment A vs B)
+        if self.observability_mode == "B":
+            roll_obs = float(rng.random()) if rng is not None else float(np.random.random())
+            stage_upper = self.observability_stage.upper()
+            if stage_upper == "B1":
+                # 80% Full Info (100% geometry + victim known), 20% Unknown (B4)
+                if roll_obs < 0.80:
+                    options["geometry_reveal_fraction"] = 1.0
+                    options["reveal_victim"] = True
+                else:
+                    options["geometry_reveal_fraction"] = 0.0
+                    options["reveal_victim"] = False
+            elif stage_upper == "B2":
+                # 70% Full Blueprint (100% geometry + victim hidden), 30% Unknown (B4)
+                if roll_obs < 0.70:
+                    options["geometry_reveal_fraction"] = 1.0
+                    options["reveal_victim"] = False
+                else:
+                    options["geometry_reveal_fraction"] = 0.0
+                    options["reveal_victim"] = False
+            elif stage_upper in ("B3", "B3A"):
+                # 60% 75% Blueprint, 40% Unknown
+                if roll_obs < 0.60:
+                    options["geometry_reveal_fraction"] = 0.75
+                    options["reveal_victim"] = False
+                else:
+                    options["geometry_reveal_fraction"] = 0.0
+                    options["reveal_victim"] = False
+            elif stage_upper == "B3B":
+                # 60% 50% Blueprint, 40% Unknown
+                if roll_obs < 0.60:
+                    options["geometry_reveal_fraction"] = 0.50
+                    options["reveal_victim"] = False
+                else:
+                    options["geometry_reveal_fraction"] = 0.0
+                    options["reveal_victim"] = False
+            elif stage_upper == "B3C":
+                # 60% 25% Blueprint, 40% Unknown
+                if roll_obs < 0.60:
+                    options["geometry_reveal_fraction"] = 0.25
+                    options["reveal_victim"] = False
+                else:
+                    options["geometry_reveal_fraction"] = 0.0
+                    options["reveal_victim"] = False
+            elif stage_upper == "B4":
+                # 100% Fully Unknown
+                options["geometry_reveal_fraction"] = 0.0
+                options["reveal_victim"] = False
+            options["observability_stage"] = stage_upper
+        else:
+            # Experiment A: 100% Fully Unknown
+            options["geometry_reveal_fraction"] = 0.0
+            options["reveal_victim"] = False
+            options["observability_stage"] = "A"
+
         return super().reset(seed=seed, options=options)
 
 
@@ -317,12 +394,22 @@ def set_env_stage(env: Any, stage: int | str, near_ratio: float | None = None, s
         env.unwrapped.set_stage(stage, near_ratio, substage)
 
 
+def set_env_observability_stage(env: Any, stage: str) -> None:
+    """Set observability curriculum stage across vectorized environments."""
+    if hasattr(env, "env_method"):
+        env.env_method("set_observability_stage", stage)
+    elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "set_observability_stage"):
+        env.unwrapped.set_observability_stage(stage)
+
+
 def make_single_train_env(
     stage: int | str = 1,
     reward_shaping: bool = True,
     navigation_shaping: bool = False,
     near_ratio: float = 0.70,
     substage: str = "2A",
+    observability_mode: str = "A",
+    observability_stage: str = "B1",
     seed: int | None = None,
 ):
     """Factory creating an individual monitored environment."""
@@ -333,6 +420,8 @@ def make_single_train_env(
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
             substage=substage,
+            observability_mode=observability_mode,
+            observability_stage=observability_stage,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -348,6 +437,8 @@ def make_train_env(
     navigation_shaping: bool = False,
     near_ratio: float = 0.70,
     substage: str = "2A",
+    observability_mode: str = "A",
+    observability_stage: str = "B1",
     n_envs: int = 8,
     base_seed: int = 42,
 ) -> DummyVecEnv | Monitor:
@@ -362,6 +453,8 @@ def make_train_env(
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
             substage=substage,
+            observability_mode=observability_mode,
+            observability_stage=observability_stage,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -373,6 +466,8 @@ def make_train_env(
             navigation_shaping=navigation_shaping,
             near_ratio=near_ratio,
             substage=substage,
+            observability_mode=observability_mode,
+            observability_stage=observability_stage,
             seed=base_seed + i * 1000,
         )
         for i in range(n_envs)
@@ -485,6 +580,9 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         verbose: int = 1,
         stage2c_mode: str = "retention_aware",
         checkpoint_freq: int | None = None,
+        observability_mode: str = "A",
+        initial_observability_stage: str = "B1",
+        total_timesteps: int = 1000000,
     ):
         super().__init__(verbose=verbose)
         self.stage = normalize_stage(stage)
@@ -503,6 +601,9 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         self.seed_start = seed_start
         self.stage2c_mode = stage2c_mode
         self.checkpoint_freq = checkpoint_freq
+        self.observability_mode = str(observability_mode).upper()
+        self.observability_stage = str(initial_observability_stage).upper()
+        self.total_timesteps = int(total_timesteps)
         self.initial_timesteps: int | None = None
 
         # Best metric tracking for strict improvement
@@ -957,6 +1058,67 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                             if self.verbose > 0:
                                 print(">>> Curriculum Milestone: Advancing to Substage 2C (Full Distant Mastery).")
 
+            # Observability Stage Transition Logic (Experiment B)
+            if self.observability_mode == "B":
+                step = self.num_timesteps
+                if self.total_timesteps <= 100000:
+                    # Pilot schedule (50k steps)
+                    if step < 15000:
+                        target_obs_stage = "B1"
+                    elif step < 30000:
+                        target_obs_stage = "B2"
+                    elif step < 40000:
+                        target_obs_stage = "B3B"
+                    else:
+                        target_obs_stage = "B4"
+                else:
+                    # Production schedule (1M steps)
+                    if step < 200000:
+                        target_obs_stage = "B1"
+                    elif step < 400000:
+                        target_obs_stage = "B2"
+                    elif step < 550000:
+                        target_obs_stage = "B3A"
+                    elif step < 700000:
+                        target_obs_stage = "B3B"
+                    elif step < 800000:
+                        target_obs_stage = "B3C"
+                    else:
+                        target_obs_stage = "B4"
+
+                if target_obs_stage != self.observability_stage:
+                    if self.best_model_save_path:
+                        cp_before = self.best_model_save_path / f"checkpoint_before_{target_obs_stage.lower()}_{step}.zip"
+                        save_checkpoint(
+                            self.model,
+                            cp_before,
+                            metadata={
+                                "evaluation_step": step,
+                                "previous_observability_stage": self.observability_stage,
+                                "next_observability_stage": target_obs_stage,
+                                "checkpoint_type": "observability_transition_before",
+                            },
+                        )
+                    prev_obs = self.observability_stage
+                    self.observability_stage = target_obs_stage
+                    set_env_observability_stage(self.train_env, target_obs_stage)
+                    if self.best_model_save_path:
+                        cp_start = self.best_model_save_path / f"checkpoint_start_{target_obs_stage.lower()}_{step}.zip"
+                        save_checkpoint(
+                            self.model,
+                            cp_start,
+                            metadata={
+                                "evaluation_step": step,
+                                "observability_stage": target_obs_stage,
+                                "checkpoint_type": "observability_transition_start",
+                            },
+                        )
+                    if self.verbose > 0:
+                        print(
+                            f"\n>>> [Observability Transition @ {step} steps]: "
+                            f"Transitioning from {prev_obs} -> {target_obs_stage}"
+                        )
+
         return True
 
 
@@ -1109,6 +1271,18 @@ def parse_args():
         help="Initial substage for Stage 2C/2D (e.g. 2C_distant, 2D_balanced)",
     )
     parser.add_argument(
+        "--observability-mode",
+        choices=["A", "B"],
+        default="A",
+        help="Observability curriculum mode: A (Unknown from start) or B (Visibility curriculum B1..B4) (default: A)",
+    )
+    parser.add_argument(
+        "--observability-stage",
+        choices=["B1", "B2", "B3a", "B3b", "B3c", "B4", "A"],
+        default=None,
+        help="Initial observability stage (default: B1 if mode B else A)",
+    )
+    parser.add_argument(
         "--skip-qualification-gate",
         action="store_true",
         help="Skip strict >=90%% qualification gate failure check (useful for test runs)",
@@ -1136,6 +1310,13 @@ def main():
     np.random.seed(args.seed)
     torch.set_num_threads(1)
 
+    # In Phase 3 Observability study, ensure navigation shaping (which uses simulator victim coordinates)
+    # is strictly disabled unless explicitly requested by flag
+    if "--navigation-shaping" not in sys.argv:
+        args.navigation_shaping = False
+
+    obs_stage = args.observability_stage or ("B1" if args.observability_mode == "B" else "A")
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1153,6 +1334,9 @@ def main():
         "near_ratio": args.near_ratio,
         "seed": args.seed,
         "device": device,
+        "observability_mode": args.observability_mode,
+        "observability_stage": obs_stage,
+        "navigation_shaping": args.navigation_shaping,
     }
 
     # Determine timesteps for stages
@@ -1190,6 +1374,8 @@ def main():
         reward_shaping=True,
         navigation_shaping=args.navigation_shaping,
         near_ratio=args.near_ratio,
+        observability_mode=args.observability_mode,
+        observability_stage=obs_stage,
         n_envs=args.n_envs,
         base_seed=args.seed,
     )
@@ -1309,6 +1495,9 @@ def main():
                 deterministic=True,
                 hyperparameters=hyperparameters,
                 seed_start=50000,
+                observability_mode=args.observability_mode,
+                initial_observability_stage=obs_stage,
+                total_timesteps=stage2_steps,
             )
 
             model.learn(
@@ -1362,6 +1551,9 @@ def main():
                 seed_start=50000,
                 stage2c_mode=args.stage2c_mode,
                 checkpoint_freq=args.checkpoint_freq,
+                observability_mode=args.observability_mode,
+                initial_observability_stage=obs_stage,
+                total_timesteps=stage2c_steps,
             )
 
             model.learn(

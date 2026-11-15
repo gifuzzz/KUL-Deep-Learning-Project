@@ -7,6 +7,104 @@ from rescue_env.flamebox.flamebox import Environment
 from .memory_map import MemoryMap
 from .reward_shaping import state_potential, potential_reward, RewardShaper
 
+
+def extract_full_building_geometry(sim) -> np.ndarray:
+    """Extract ground-truth 9-channel building geometry from sim.
+
+    Channels:
+      Ch 0: Passability North (1.0 if face to North is passable / flux >= 0.5)
+      Ch 1: Passability East (1.0 if face to East is passable / flux >= 0.5)
+      Ch 2: Passability South (1.0 if face to South is passable / flux >= 0.5)
+      Ch 3: Passability West (1.0 if face to West is passable / flux >= 0.5)
+      Ch 4: Debris (1.0 if debris present)
+      Ch 5: 0.0 (Explored mask remains unvisited)
+      Ch 6: 0.0 (Victim populated separately if reveal_victim=True)
+      Ch 7: Exit (1.0 at exit portal cells)
+      Ch 8: 0.0 (Agent position populated during observation generation)
+    """
+    geom = np.zeros((9, sim.h, sim.w), dtype=np.float32)
+
+    # Passability North (r > 0)
+    if sim.h > 1:
+        geom[0, 1:, :] = (sim.south >= 0.5).astype(np.float32)
+
+    # Passability East (c+1 < w)
+    if sim.w > 1:
+        geom[1, :, :-1] = (sim.east >= 0.5).astype(np.float32)
+
+    # Passability South (r+1 < h)
+    if sim.h > 1:
+        geom[2, :-1, :] = (sim.south >= 0.5).astype(np.float32)
+
+    # Passability West (c > 0)
+    if sim.w > 1:
+        geom[3, :, 1:] = (sim.east >= 0.5).astype(np.float32)
+
+    # Debris
+    geom[4] = (sim.debris > 0).astype(np.float32)
+
+    # Exit portals and exit doorway passability
+    for opening in sim.openings:
+        if opening["kind"] != "exit":
+            continue
+        for row, col in sim._portal_cells(opening, opening["zone_a"]):
+            if 0 <= row < sim.h and 0 <= col < sim.w:
+                geom[7, row, col] = 1.0
+                face = (
+                    (0 if opening["at"] == 0 else 2)
+                    if opening["orient"] == "H"
+                    else (3 if opening["at"] == 0 else 1)
+                )
+                is_passable = bool(
+                    opening["open"]
+                    and not opening.get("blocked")
+                    and not (sim.debris[row, col] > 0)
+                )
+                geom[face, row, col] = 1.0 if is_passable else 0.0
+
+    return geom
+
+
+def get_connected_revealed_mask(sim, start_pos: tuple[int, int], fraction: float) -> np.ndarray:
+    """Generate a contiguous connected mask of revealed cells via grid-BFS."""
+    if fraction >= 1.0:
+        return (sim.zone >= 0)
+    if fraction <= 0.0:
+        return np.zeros((sim.h, sim.w), dtype=bool)
+
+    total_interior = int(np.count_nonzero(sim.zone >= 0))
+    target_count = int(round(fraction * total_interior))
+    if target_count <= 0:
+        return np.zeros((sim.h, sim.w), dtype=bool)
+
+    revealed = np.zeros((sim.h, sim.w), dtype=bool)
+    sr, sc = start_pos
+    if not (0 <= sr < sim.h and 0 <= sc < sim.w):
+        return revealed
+
+    queue = deque([(sr, sc)])
+    revealed[sr, sc] = True
+    count = 1
+
+    while queue and count < target_count:
+        r, c = queue.popleft()
+        neighbors = (
+            (r - 1, c, r > 0 and sim.south[r - 1, c] >= 0.5),
+            (r, c + 1, c + 1 < sim.w and sim.east[r, c] >= 0.5),
+            (r + 1, c, r + 1 < sim.h and sim.south[r, c] >= 0.5),
+            (r, c - 1, c > 0 and sim.east[r, c - 1] >= 0.5),
+        )
+        for nr, nc, passable in neighbors:
+            if passable and not revealed[nr, nc] and not sim.debris[nr, nc]:
+                revealed[nr, nc] = True
+                count += 1
+                queue.append((nr, nc))
+                if count >= target_count:
+                    break
+
+    return revealed
+
+
 class RescueEnv(gym.Env):
     """Gymnasium interface for one FlameBox firefighter."""
 
@@ -18,7 +116,9 @@ class RescueEnv(gym.Env):
     def __init__(self, max_steps=500, visibility_radius=7, victim_distance=3,
                  reward_shaping=False, fixed_seed=None, scenario_seeds=None,
                  min_victim_distance=1, navigation_shaping=False,
-                 memory_agent_marker=False, exploration_bonus=0.0):
+                 memory_agent_marker=False, exploration_bonus=0.0,
+                 geometry_reveal_fraction=0.0, reveal_victim=False,
+                 observability_stage="A"):
         super().__init__()
 
         self.max_steps = max_steps
@@ -31,6 +131,10 @@ class RescueEnv(gym.Env):
         if not np.isfinite(exploration_bonus) or exploration_bonus < 0:
             raise ValueError("exploration_bonus must be finite and nonnegative")
         self.exploration_bonus = exploration_bonus
+
+        self.geometry_reveal_fraction = float(geometry_reveal_fraction)
+        self.reveal_victim = bool(reveal_victim)
+        self.observability_stage = str(observability_stage)
 
         self.fixed_seed = fixed_seed
         self.min_victim_distance = min_victim_distance
@@ -308,6 +412,14 @@ class RescueEnv(gym.Env):
         if self.reward_shaper is not None:
             self.reward_shaper.reset()
 
+        if options:
+            if "geometry_reveal_fraction" in options:
+                self.geometry_reveal_fraction = float(options["geometry_reveal_fraction"])
+            if "reveal_victim" in options:
+                self.reveal_victim = bool(options["reveal_victim"])
+            if "observability_stage" in options:
+                self.observability_stage = str(options["observability_stage"])
+
         self.memory = MemoryMap(
             height=self.sim.h,
             width=self.sim.w,
@@ -316,9 +428,35 @@ class RescueEnv(gym.Env):
             max_width=self.max_width,
         )
 
+        # Prefill privileged geometry or victim location if enabled by curriculum
+        if self.geometry_reveal_fraction > 0.0 or self.reveal_victim:
+            full_geom = extract_full_building_geometry(self.sim)
+            agent_pos = (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
+            revealed_mask = get_connected_revealed_mask(
+                self.sim,
+                start_pos=agent_pos,
+                fraction=self.geometry_reveal_fraction,
+            )
+            victim_pos = (
+                (self.sim.victims[0]["r"], self.sim.victims[0]["c"])
+                if (self.reveal_victim and len(self.sim.victims) > 0)
+                else None
+            )
+            self.memory.prefill_geometry(
+                full_geometry=full_geom,
+                revealed_mask=revealed_mask,
+                victim_pos=victim_pos,
+            )
+
         observation = self._get_observation()
-        info = {"seed": episode_seed, "scenario_seed": scenario_seed,
-                "victim_exit_distance": self.victim_exit_distance}
+        info = {
+            "seed": episode_seed,
+            "scenario_seed": scenario_seed,
+            "victim_exit_distance": self.victim_exit_distance,
+            "geometry_reveal_fraction": self.geometry_reveal_fraction,
+            "reveal_victim": self.reveal_victim,
+            "observability_stage": self.observability_stage,
+        }
 
         return observation, info
 

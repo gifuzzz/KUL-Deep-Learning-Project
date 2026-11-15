@@ -42,6 +42,32 @@ class MemoryMap:
 
         self.last_agent_position = None
 
+    def prefill_geometry(
+        self,
+        full_geometry: np.ndarray,
+        revealed_mask: np.ndarray | None = None,
+        victim_pos: tuple[int, int] | None = None,
+    ):
+        """Prefill known building geometry and/or victim position into memory.
+
+        Channels 0, 1, 2, 3, 4, 7 are copied for revealed cells.
+        If victim_pos is provided, channel 6 is populated at that location.
+        CRITICAL: self.explored and self.grid[5] remain strictly 0.0, ensuring
+        that prefilled geometry does not trigger false exploration rewards and
+        the policy can distinguish between known blueprint and physically visited cells.
+        """
+        if revealed_mask is None:
+            revealed_mask = np.ones((self.height, self.width), dtype=bool)
+
+        for ch in (0, 1, 2, 3, 4, 7):
+            if ch < self.channels and ch < full_geometry.shape[0]:
+                self.grid[ch, revealed_mask] = full_geometry[ch, revealed_mask]
+
+        if victim_pos is not None and self.channels > 6:
+            vr, vc = victim_pos
+            if 0 <= vr < self.height and 0 <= vc < self.width:
+                self.grid[6, vr, vc] = 1.0
+
     def update(self, local_grid, agent_position):
         self.last_agent_position = agent_position
         agent_r, agent_c = agent_position
