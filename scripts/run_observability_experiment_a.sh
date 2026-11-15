@@ -26,9 +26,14 @@ fi
 DEVICE="cpu"
 if "${PYTHON_BIN}" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
     DEVICE="cuda"
+elif "${PYTHON_BIN}" -c "import torch; exit(0 if torch.backends.mps.is_available() else 1)" 2>/dev/null; then
+    DEVICE="mps"
 fi
 
 SEED="${1:-42}"
+if [[ $# -gt 0 ]]; then
+    shift
+fi
 SAVE_DIR="models/observability_ablation/experiment_a_s${SEED}"
 TOTAL_TIMESTEPS=1000000
 
