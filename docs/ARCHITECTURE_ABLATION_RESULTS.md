@@ -89,6 +89,19 @@ To ensure that results are not artifacts of hardware differences or pseudo-rando
 
 **Conclusion on Platform Replication:** Across all six difficulty tiers and 2,400 evaluated episodes, the cross-platform variance between Apple Silicon MPS and Linux CUDA is under 1.5% on primary milestones (Medium Det $\Delta = 0.5\%$, Medium Stoch $\Delta = 0.5\%$, Distant $\Delta = 0.0\%$). The policy exhibits robust, platform-invariant generalization.
 
+### 3.2 Head-to-Head 200-Episode Matched Benchmark: `baseline` vs. `deep128` (CUDA)
+
+Both models were evaluated on the high-performance Linux cluster using **identical held-out seeds (50000..50199)** across all 6 standardized distance ladder tiers (200 episodes per tier, $N=1,200$ total episodes per architecture) under unshaped conditions (+10 native rescue only).
+
+| Distance Tier | Metric | `baseline` Det | `deep128` Det | `baseline` Stoch | `deep128` Stoch | Empirical Takeaway |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Near**<br>($d=2$, steps=64) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr%<br>Mean Steps<br>Oscillation% | 100.0%<br>100.0%<br>**99.5%**<br>99.5%<br>0.5%<br>3.0<br>**9.1%** | 100.0%<br>94.5%<br>**94.5%**<br>100.0%<br>0.0%<br>3.5<br>45.6% | 100.0%<br>99.5%<br>**98.5%**<br>99.0%<br>1.0%<br>5.6<br>**19.8%** | 100.0%<br>97.0%<br>**95.5%**<br>98.5%<br>1.5%<br>5.5<br>27.1% | `baseline` has significantly lower deterministic oscillation (9.1% vs 45.6%) |
+| **Medium**<br>($d=6$, steps=128) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr%<br>Mean Steps<br>Oscillation% | 53.0%<br>45.5%<br>**36.5%**<br>80.2%<br>9.0%<br>12.9<br>81.7% | 52.5%<br>33.0%<br>**31.5%**<br>**95.5%**<br>**1.5%**<br>12.5<br>85.2% | 56.0%<br>52.0%<br>**44.0%**<br>84.6%<br>8.0%<br>27.8<br>38.4% | 55.0%<br>45.5%<br>**41.5%**<br>**91.2%**<br>**4.0%**<br>28.5<br>37.7% | `deep128` achieves exceptional return navigation (95.5% Ret\|Pick, 1.5% Timeout Carr) |
+| **Bridge A**<br>($d=8$, steps=160) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr%<br>Mean Steps<br>Oscillation% | 59.0%<br>49.0%<br>**27.5%**<br>56.1%<br>21.5%<br>21.1<br>84.2% | 56.0%<br>27.0%<br>**23.0%**<br>**85.2%**<br>**4.0%**<br>15.0<br>87.8% | 62.5%<br>52.5%<br>34.5%<br>65.7%<br>18.0%<br>45.4<br>39.4% | 63.0%<br>45.5%<br>**39.5%**<br>**86.8%**<br>**6.0%**<br>44.3<br>38.4% | `deep128` drops carrier timeouts by 17.5% in Det and 12.0% in Stoch; leads Stoch Rescue (39.5% vs 34.5%) |
+| **Bridge B**<br>($d=10$, steps=192) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr%<br>Mean Steps<br>Oscillation% | 55.0%<br>34.5%<br>**9.5%**<br>27.5%<br>25.0%<br>28.8<br>87.4% | 44.5%<br>14.0%<br>7.5%<br>**53.6%**<br>**6.5%**<br>21.8<br>90.4% | 59.5%<br>44.5%<br>22.0%<br>49.4%<br>22.5%<br>68.7<br>42.6% | 59.5%<br>33.5%<br>**23.5%**<br>**70.1%**<br>**10.0%**<br>62.5<br>39.9% | `deep128` delivers +20.7% higher return rate; `baseline` has higher initial pickup (44.5% vs 33.5%) |
+| **Bridge C**<br>($d=12$, steps=256) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr%<br>Mean Steps<br>Oscillation% | 45.0%<br>22.0%<br>**4.5%**<br>20.5%<br>17.5%<br>31.1<br>90.5% | 26.5%<br>8.0%<br>**4.5%**<br>**56.2%**<br>**3.5%**<br>27.0<br>91.7% | 52.0%<br>31.0%<br>**11.0%**<br>35.5%<br>20.0%<br>106.6<br>45.8% | 47.5%<br>20.5%<br>**11.0%**<br>**53.7%**<br>**9.5%**<br>90.1<br>40.7% | Identical overall rescue rate (11.0% Stoch, 4.5% Det); `deep128` cuts carrier timeouts in half (9.5% vs 20.0%) |
+| **Distant**<br>($d=\text{None}$, steps=384) | Discovery%<br>Pickup%<br>**Rescue%**<br>Return\|Pick%<br>Timeout Carr% | 3.0%<br>1.0%<br>**0.0%**<br>0.0%<br>1.0% | 0.0%<br>0.0%<br>**0.0%**<br>0.0%<br>0.0% | 10.5%<br>**6.0%**<br>**1.5%**<br>25.0%<br>4.5% | 12.5%<br>1.5%<br>0.0%<br>0.0%<br>1.5% | `baseline` successfully solves 1.5% of distant episodes; `deep128` solves 0.0% |
+
 ---
 
 ## 4. Scientific Analysis: Why Did `deep256` Collapse?
