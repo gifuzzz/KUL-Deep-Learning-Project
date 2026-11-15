@@ -127,6 +127,9 @@ class CurriculumRescueEnv(RescueEnv):
         substage: str = "2A",
         observability_mode: str = "A",
         observability_stage: str = "B1",
+        enable_multitask: bool = False,
+        task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
+        discovery_reward: float = 2.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -140,6 +143,9 @@ class CurriculumRescueEnv(RescueEnv):
         self._update_active_bridge(self.substage)
         self.observability_mode = str(observability_mode).upper()
         self.observability_stage = str(observability_stage).upper()
+        self.enable_multitask = bool(enable_multitask)
+        self.task_mixture = tuple(task_mixture) if task_mixture is not None else (0.50, 0.25, 0.25)
+        self.discovery_reward = float(discovery_reward)
 
     def _update_active_bridge(self, substage: str) -> None:
         if substage == "2C_bridge8":
@@ -171,6 +177,18 @@ class CurriculumRescueEnv(RescueEnv):
     def set_observability_stage(self, stage: str) -> None:
         self.observability_stage = str(stage).upper()
 
+    def set_multitask(
+        self,
+        enable: bool = True,
+        task_mixture: tuple[float, float, float] | None = None,
+        discovery_reward: float | None = None,
+    ) -> None:
+        self.enable_multitask = bool(enable)
+        if task_mixture is not None:
+            self.task_mixture = tuple(task_mixture)
+        if discovery_reward is not None:
+            self.discovery_reward = float(discovery_reward)
+
     def reset(self, *, seed=None, options=None):
         if options is None:
             options = {}
@@ -188,145 +206,191 @@ class CurriculumRescueEnv(RescueEnv):
             self.observability_mode = str(options["observability_mode"]).upper()
         if "observability_stage" in options:
             self.observability_stage = str(options["observability_stage"]).upper()
+        if "enable_multitask" in options:
+            self.enable_multitask = bool(options["enable_multitask"])
+        if "task_mixture" in options:
+            self.task_mixture = tuple(options["task_mixture"])
+        if "discovery_reward" in options:
+            self.discovery_reward = float(options["discovery_reward"])
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
 
-        if self.stage == 1:
-            if roll < self.near_ratio:
-                self._apply_tier_config("near")
-            else:
-                self._apply_tier_config("medium")
-        elif self.stage == "2C" or str(self.substage).startswith("2C_") or self.substage in ("reinforce_near", "reinforce_medium"):
-            # Stage 2C Distance Bridge Curriculum
-            if self.substage == "reinforce_near":
-                if roll < 0.60:
-                    self._apply_tier_config("near")
-                elif roll < 0.90:
+        is_auxiliary_task = False
+        if self.enable_multitask:
+            roll_task = float(rng.random()) if rng is not None else float(np.random.random())
+            p_full, p_return, p_discovery = self.task_mixture
+            if roll_task < p_full:
+                options["task_type"] = "full"
+            elif roll_task < p_full + p_return:
+                options["task_type"] = "return"
+                is_auxiliary_task = True
+                # Return training: sample deep victim distance tier
+                roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                if roll_tier < 0.20:
                     self._apply_tier_config("medium")
-                else:
-                    self.victim_distance = None
-                    self.min_victim_distance = 1
-                    self.max_steps = 256
-            elif self.substage == "reinforce_medium":
-                if roll < 0.30:
-                    self._apply_tier_config("near")
-                elif roll < 0.75:
-                    self._apply_tier_config("medium")
-                else:
-                    bridge_tier = getattr(self, "active_bridge", "bridge_a")
-                    self._apply_tier_config(bridge_tier)
-            elif self.substage == "2C_bridge8":
-                if roll < 0.20:
-                    self._apply_tier_config("near")
-                elif roll < 0.60:
-                    self._apply_tier_config("medium")
-                else:
+                elif roll_tier < 0.45:
                     self._apply_tier_config("bridge_a")
-            elif self.substage == "2C_bridge10":
-                if roll < 0.15:
-                    self._apply_tier_config("near")
-                elif roll < 0.40:
-                    self._apply_tier_config("medium")
-                elif roll < 0.70:
-                    self._apply_tier_config("bridge_a")
-                else:
+                elif roll_tier < 0.70:
                     self._apply_tier_config("bridge_b")
-            elif self.substage == "2C_bridge12":
-                if roll < 0.10:
-                    self._apply_tier_config("near")
-                elif roll < 0.30:
-                    self._apply_tier_config("medium")
-                elif roll < 0.60:
-                    self._apply_tier_config("bridge_b")
-                else:
+                elif roll_tier < 0.90:
                     self._apply_tier_config("bridge_c")
-            elif self.substage in ("2C_distant", "2D_balanced"):
-                if self.substage == "2D_balanced":
-                    # Balanced Stage 2D Retention: 20% near, 30% medium, 12.5% bridge_b, 12.5% bridge_c, 25% distant
+                else:
+                    self._apply_tier_config("distant")
+            else:
+                options["task_type"] = "discovery"
+                is_auxiliary_task = True
+                # Discovery training: sample distant victim tier to train multi-room exploration
+                roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                if roll_tier < 0.20:
+                    self._apply_tier_config("bridge_a")
+                elif roll_tier < 0.50:
+                    self._apply_tier_config("bridge_b")
+                elif roll_tier < 0.80:
+                    self._apply_tier_config("bridge_c")
+                else:
+                    self._apply_tier_config("distant")
+
+            options["discovery_reward"] = self.discovery_reward
+        else:
+            options["task_type"] = "full"
+
+        if not is_auxiliary_task:
+            if self.stage == 1:
+                if roll < self.near_ratio:
+                    self._apply_tier_config("near")
+                else:
+                    self._apply_tier_config("medium")
+            elif self.stage == "2C" or str(self.substage).startswith("2C_") or self.substage in ("reinforce_near", "reinforce_medium"):
+                # Stage 2C Distance Bridge Curriculum
+                if self.substage == "reinforce_near":
+                    if roll < 0.60:
+                        self._apply_tier_config("near")
+                    elif roll < 0.90:
+                        self._apply_tier_config("medium")
+                    else:
+                        self.victim_distance = None
+                        self.min_victim_distance = 1
+                        self.max_steps = 256
+                elif self.substage == "reinforce_medium":
+                    if roll < 0.30:
+                        self._apply_tier_config("near")
+                    elif roll < 0.75:
+                        self._apply_tier_config("medium")
+                    else:
+                        bridge_tier = getattr(self, "active_bridge", "bridge_a")
+                        self._apply_tier_config(bridge_tier)
+                elif self.substage == "2C_bridge8":
                     if roll < 0.20:
                         self._apply_tier_config("near")
-                    elif roll < 0.50:
+                    elif roll < 0.60:
                         self._apply_tier_config("medium")
-                    elif roll < 0.625:
-                        self._apply_tier_config("bridge_b")
-                    elif roll < 0.75:
-                        self._apply_tier_config("bridge_c")
                     else:
-                        self._apply_tier_config("distant")
-                else:
+                        self._apply_tier_config("bridge_a")
+                elif self.substage == "2C_bridge10":
+                    if roll < 0.15:
+                        self._apply_tier_config("near")
+                    elif roll < 0.40:
+                        self._apply_tier_config("medium")
+                    elif roll < 0.70:
+                        self._apply_tier_config("bridge_a")
+                    else:
+                        self._apply_tier_config("bridge_b")
+                elif self.substage == "2C_bridge12":
                     if roll < 0.10:
                         self._apply_tier_config("near")
-                    elif roll < 0.25:
+                    elif roll < 0.30:
                         self._apply_tier_config("medium")
-                    elif roll < 0.375:
+                    elif roll < 0.60:
                         self._apply_tier_config("bridge_b")
-                    elif roll < 0.50:
-                        self._apply_tier_config("bridge_c")
                     else:
-                        self._apply_tier_config("distant")
+                        self._apply_tier_config("bridge_c")
+                elif self.substage in ("2C_distant", "2D_balanced"):
+                    if self.substage == "2D_balanced":
+                        # Balanced Stage 2D Retention: 20% near, 30% medium, 12.5% bridge_b, 12.5% bridge_c, 25% distant
+                        if roll < 0.20:
+                            self._apply_tier_config("near")
+                        elif roll < 0.50:
+                            self._apply_tier_config("medium")
+                        elif roll < 0.625:
+                            self._apply_tier_config("bridge_b")
+                        elif roll < 0.75:
+                            self._apply_tier_config("bridge_c")
+                        else:
+                            self._apply_tier_config("distant")
+                    else:
+                        if roll < 0.10:
+                            self._apply_tier_config("near")
+                        elif roll < 0.25:
+                            self._apply_tier_config("medium")
+                        elif roll < 0.375:
+                            self._apply_tier_config("bridge_b")
+                        elif roll < 0.50:
+                            self._apply_tier_config("bridge_c")
+                        else:
+                            self._apply_tier_config("distant")
+                else:
+                    # Fallback to 2C_bridge8
+                    if roll < 0.20:
+                        self._apply_tier_config("near")
+                    elif roll < 0.60:
+                        self._apply_tier_config("medium")
+                    else:
+                        self._apply_tier_config("bridge_a")
             else:
-                # Fallback to 2C_bridge8
-                if roll < 0.20:
-                    self._apply_tier_config("near")
-                elif roll < 0.60:
-                    self._apply_tier_config("medium")
-                else:
-                    self._apply_tier_config("bridge_a")
-        else:
-            # Stage 2 Staged Progression (Existing unchanged)
-            if self.substage == "reinforce_near":
-                if roll < 0.60:
-                    self.victim_distance = 2
-                    self.min_victim_distance = 1
-                    self.max_steps = 64
-                elif roll < 0.90:
-                    self.victim_distance = 6
-                    self.min_victim_distance = 3
-                    self.max_steps = 128
-                else:
-                    self.victim_distance = None
-                    self.min_victim_distance = 1
-                    self.max_steps = 256
-            elif self.substage == "2A":
-                if roll < 0.30:
-                    self.victim_distance = 2
-                    self.min_victim_distance = 1
-                    self.max_steps = 64
-                elif roll < 0.80:
-                    self.victim_distance = 6
-                    self.min_victim_distance = 3
-                    self.max_steps = 128
-                else:
-                    self.victim_distance = None
-                    self.min_victim_distance = 1
-                    self.max_steps = 256
-            elif self.substage == "2B":
-                if roll < 0.20:
-                    self.victim_distance = 2
-                    self.min_victim_distance = 1
-                    self.max_steps = 64
-                elif roll < 0.50:
-                    self.victim_distance = 6
-                    self.min_victim_distance = 3
-                    self.max_steps = 128
-                else:
-                    self.victim_distance = None
-                    self.min_victim_distance = 1
-                    self.max_steps = 384
-            else:  # "2C" Distant Mastery
-                if roll < 0.10:
-                    self.victim_distance = 2
-                    self.min_victim_distance = 1
-                    self.max_steps = 64
-                elif roll < 0.30:
-                    self.victim_distance = 6
-                    self.min_victim_distance = 3
-                    self.max_steps = 128
-                else:
-                    self.victim_distance = None
-                    self.min_victim_distance = 1
-                    self.max_steps = 384
+                # Stage 2 Staged Progression (Existing unchanged)
+                if self.substage == "reinforce_near":
+                    if roll < 0.60:
+                        self.victim_distance = 2
+                        self.min_victim_distance = 1
+                        self.max_steps = 64
+                    elif roll < 0.90:
+                        self.victim_distance = 6
+                        self.min_victim_distance = 3
+                        self.max_steps = 128
+                    else:
+                        self.victim_distance = None
+                        self.min_victim_distance = 1
+                        self.max_steps = 256
+                elif self.substage == "2A":
+                    if roll < 0.30:
+                        self.victim_distance = 2
+                        self.min_victim_distance = 1
+                        self.max_steps = 64
+                    elif roll < 0.80:
+                        self.victim_distance = 6
+                        self.min_victim_distance = 3
+                        self.max_steps = 128
+                    else:
+                        self.victim_distance = None
+                        self.min_victim_distance = 1
+                        self.max_steps = 256
+                elif self.substage == "2B":
+                    if roll < 0.20:
+                        self.victim_distance = 2
+                        self.min_victim_distance = 1
+                        self.max_steps = 64
+                    elif roll < 0.50:
+                        self.victim_distance = 6
+                        self.min_victim_distance = 3
+                        self.max_steps = 128
+                    else:
+                        self.victim_distance = None
+                        self.min_victim_distance = 1
+                        self.max_steps = 384
+                else:  # "2C" Distant Mastery
+                    if roll < 0.10:
+                        self.victim_distance = 2
+                        self.min_victim_distance = 1
+                        self.max_steps = 64
+                    elif roll < 0.30:
+                        self.victim_distance = 6
+                        self.min_victim_distance = 3
+                        self.max_steps = 128
+                    else:
+                        self.victim_distance = None
+                        self.min_victim_distance = 1
+                        self.max_steps = 384
 
         # Observability Configuration (Experiment A vs B)
         if self.observability_mode == "B":
@@ -402,6 +466,19 @@ def set_env_observability_stage(env: Any, stage: str) -> None:
         env.unwrapped.set_observability_stage(stage)
 
 
+def set_env_multitask(
+    env: Any,
+    enable: bool = True,
+    task_mixture: tuple[float, float, float] | None = None,
+    discovery_reward: float | None = None,
+) -> None:
+    """Configure multi-task training across vectorized environments."""
+    if hasattr(env, "env_method"):
+        env.env_method("set_multitask", enable, task_mixture, discovery_reward)
+    elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "set_multitask"):
+        env.unwrapped.set_multitask(enable, task_mixture, discovery_reward)
+
+
 def make_single_train_env(
     stage: int | str = 1,
     reward_shaping: bool = True,
@@ -410,6 +487,9 @@ def make_single_train_env(
     substage: str = "2A",
     observability_mode: str = "A",
     observability_stage: str = "B1",
+    enable_multitask: bool = False,
+    task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    discovery_reward: float = 2.0,
     seed: int | None = None,
 ):
     """Factory creating an individual monitored environment."""
@@ -422,6 +502,9 @@ def make_single_train_env(
             substage=substage,
             observability_mode=observability_mode,
             observability_stage=observability_stage,
+            enable_multitask=enable_multitask,
+            task_mixture=task_mixture,
+            discovery_reward=discovery_reward,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -439,6 +522,9 @@ def make_train_env(
     substage: str = "2A",
     observability_mode: str = "A",
     observability_stage: str = "B1",
+    enable_multitask: bool = False,
+    task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    discovery_reward: float = 2.0,
     n_envs: int = 8,
     base_seed: int = 42,
 ) -> DummyVecEnv | Monitor:
@@ -455,6 +541,9 @@ def make_train_env(
             substage=substage,
             observability_mode=observability_mode,
             observability_stage=observability_stage,
+            enable_multitask=enable_multitask,
+            task_mixture=task_mixture,
+            discovery_reward=discovery_reward,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -468,6 +557,9 @@ def make_train_env(
             substage=substage,
             observability_mode=observability_mode,
             observability_stage=observability_stage,
+            enable_multitask=enable_multitask,
+            task_mixture=task_mixture,
+            discovery_reward=discovery_reward,
             seed=base_seed + i * 1000,
         )
         for i in range(n_envs)
@@ -1283,6 +1375,24 @@ def parse_args():
         help="Initial observability stage (default: B1 if mode B else A)",
     )
     parser.add_argument(
+        "--multi-task",
+        action="store_true",
+        default=False,
+        help="Enable multi-task curriculum (Full rescue, Return training, Discovery training)",
+    )
+    parser.add_argument(
+        "--task-mixture",
+        type=str,
+        default="0.5,0.25,0.25",
+        help="Task mixture weights as 'full,return,discovery' probabilities (default: '0.5,0.25,0.25')",
+    )
+    parser.add_argument(
+        "--discovery-reward",
+        type=float,
+        default=2.0,
+        help="Auxiliary reward awarded on legitimate first discovery in discovery task (default: 2.0)",
+    )
+    parser.add_argument(
         "--skip-qualification-gate",
         action="store_true",
         help="Skip strict >=90%% qualification gate failure check (useful for test runs)",
@@ -1317,6 +1427,13 @@ def main():
 
     obs_stage = args.observability_stage or ("B1" if args.observability_mode == "B" else "A")
 
+    task_mixture = (0.50, 0.25, 0.25)
+    if args.multi_task:
+        parts = [float(p.strip()) for p in args.task_mixture.split(",")]
+        total = sum(parts)
+        task_mixture = tuple(p / total for p in parts)
+        print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery), discovery_reward={args.discovery_reward}")
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1337,6 +1454,9 @@ def main():
         "observability_mode": args.observability_mode,
         "observability_stage": obs_stage,
         "navigation_shaping": args.navigation_shaping,
+        "multi_task": args.multi_task,
+        "task_mixture": task_mixture,
+        "discovery_reward": args.discovery_reward,
     }
 
     # Determine timesteps for stages
@@ -1376,6 +1496,9 @@ def main():
         near_ratio=args.near_ratio,
         observability_mode=args.observability_mode,
         observability_stage=obs_stage,
+        enable_multitask=args.multi_task,
+        task_mixture=task_mixture,
+        discovery_reward=args.discovery_reward,
         n_envs=args.n_envs,
         base_seed=args.seed,
     )

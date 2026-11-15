@@ -118,7 +118,7 @@ class RescueEnv(gym.Env):
                  min_victim_distance=1, navigation_shaping=False,
                  memory_agent_marker=False, exploration_bonus=0.0,
                  geometry_reveal_fraction=0.0, reveal_victim=False,
-                 observability_stage="A"):
+                 observability_stage="A", task_type="full", discovery_reward=2.0):
         super().__init__()
 
         self.max_steps = max_steps
@@ -135,6 +135,12 @@ class RescueEnv(gym.Env):
         self.geometry_reveal_fraction = float(geometry_reveal_fraction)
         self.reveal_victim = bool(reveal_victim)
         self.observability_stage = str(observability_stage)
+
+        if str(task_type).lower() not in ("full", "return", "discovery"):
+            raise ValueError(f"Unknown task_type: '{task_type}'. Valid: 'full', 'return', 'discovery'")
+        self.task_type = str(task_type).lower()
+        self.discovery_reward = float(discovery_reward)
+        self._discovery_completed = False
 
         self.fixed_seed = fixed_seed
         self.min_victim_distance = min_victim_distance
@@ -263,6 +269,143 @@ class RescueEnv(gym.Env):
         # Synchronize with native C++ simulation
         e._core.set_people(e.victims, e.agents)
         e.tick(0)
+
+    def _find_path_to_victim(self, start, target):
+        """Find shortest traversable grid path from start to target via BFS."""
+        e = self.sim
+        if start == target:
+            return [start]
+        queue = deque([start])
+        parent = {start: None}
+        visited = {start}
+        while queue:
+            curr = queue.popleft()
+            if curr == target:
+                break
+            r, c = curr
+            neighbors = (
+                (r - 1, c, e.south[r - 1, c] if r > 0 else 0),
+                (r, c + 1, e.east[r, c] if c + 1 < e.w else 0),
+                (r + 1, c, e.south[r, c] if r + 1 < e.h else 0),
+                (r, c - 1, e.east[r, c - 1] if c > 0 else 0),
+            )
+            for nr, nc, cond in neighbors:
+                if (
+                    0 <= nr < e.h
+                    and 0 <= nc < e.w
+                    and cond >= 0.5
+                    and not e.debris[nr, nc]
+                    and (nr, nc) not in visited
+                ):
+                    visited.add((nr, nc))
+                    parent[(nr, nc)] = curr
+                    queue.append((nr, nc))
+
+        if target not in parent:
+            return [start, target]
+
+        path = []
+        curr = target
+        while curr is not None:
+            path.append(curr)
+            curr = parent[curr]
+        path.reverse()
+        return path
+
+    def _populate_path_memory(self, path, exit_opening, victim_pos):
+        """Populate memory with ground-truth observations along the traversed corridor.
+
+        Only the path from the exit to the victim, its adjacent visible cells,
+        the exit portal, and the victim are marked explored. Unvisited rooms remain unknown (0.0).
+        """
+        e = self.sim
+        # Mark exit opening portal cells
+        for er, ec in e._portal_cells(exit_opening, exit_opening["zone_a"]):
+            if 0 <= er < self.memory.height and 0 <= ec < self.memory.width:
+                self.memory.grid[7, er, ec] = 1.0
+                self.memory.grid[5, er, ec] = 1.0
+                self.memory.explored[er, ec] = 1.0
+                face = (
+                    (0 if exit_opening["at"] == 0 else 2)
+                    if exit_opening["orient"] == "H"
+                    else (3 if exit_opening["at"] == 0 else 1)
+                )
+                self.memory.grid[face, er, ec] = 1.0
+
+        # Mark all cells along the path as explored and populate ground truth passability
+        for r, c in path:
+            if 0 <= r < self.memory.height and 0 <= c < self.memory.width:
+                self.memory.grid[0, r, c] = float(e.south[r - 1, c] >= 0.5 if r > 0 else 0)
+                self.memory.grid[1, r, c] = float(e.east[r, c] >= 0.5 if c + 1 < e.w else 0)
+                self.memory.grid[2, r, c] = float(e.south[r, c] >= 0.5 if r + 1 < e.h else 0)
+                self.memory.grid[3, r, c] = float(e.east[r, c - 1] >= 0.5 if c > 0 else 0)
+                self.memory.grid[4, r, c] = float(e.debris[r, c] > 0)
+                self.memory.grid[5, r, c] = 1.0
+                self.memory.explored[r, c] = 1.0
+
+                # Also observe immediate adjacent open cells visible from path
+                neighbors = (
+                    (r - 1, c, e.south[r - 1, c] if r > 0 else 0),
+                    (r, c + 1, e.east[r, c] if c + 1 < e.w else 0),
+                    (r + 1, c, e.south[r, c] if r + 1 < e.h else 0),
+                    (r, c - 1, e.east[r, c - 1] if c > 0 else 0),
+                )
+                for nr, nc, cond in neighbors:
+                    if 0 <= nr < self.memory.height and 0 <= nc < self.memory.width and cond >= 0.5:
+                        self.memory.grid[0, nr, nc] = float(e.south[nr - 1, nc] >= 0.5 if nr > 0 else 0)
+                        self.memory.grid[1, nr, nc] = float(e.east[nr, nc] >= 0.5 if nc + 1 < e.w else 0)
+                        self.memory.grid[2, nr, nc] = float(e.south[nr, nc] >= 0.5 if nr + 1 < e.h else 0)
+                        self.memory.grid[3, nr, nc] = float(e.east[nr, nc - 1] >= 0.5 if nc > 0 else 0)
+                        self.memory.grid[4, nr, nc] = float(e.debris[nr, nc] > 0)
+                        self.memory.grid[5, nr, nc] = 1.0
+                        self.memory.explored[nr, nc] = 1.0
+
+        vr, vc = victim_pos
+        if 0 <= vr < self.memory.height and 0 <= vc < self.memory.width:
+            self.memory.grid[6, vr, vc] = 1.0
+
+    def _setup_return_task(self):
+        """Configure scenario where agent is already carrying victim deep inside the building,
+        with remembered map physically consistent with path traveled from an exit portal."""
+        if len(self.sim.victims) == 0:
+            return
+
+        victim = self.sim.victims[0]
+        vr, vc = int(victim["r"]), int(victim["c"])
+
+        # Find exit opening
+        exit_opening = next(
+            (o for o in self.sim.openings if o["kind"] == "exit" and o["open"] and not o.get("blocked")),
+            None,
+        )
+        if exit_opening is None:
+            return
+
+        start_cell = self.sim._cells_for_opening(exit_opening, exit_opening["zone_a"])
+
+        # Find shortest traversable path from exit portal to victim cell
+        path = self._find_path_to_victim(start_cell, (vr, vc))
+
+        # Position agent at victim position
+        self.sim.agents[0]["r"] = vr
+        self.sim.agents[0]["c"] = vc
+
+        # Attach victim as carried by agent 0
+        victim["r"] = vr
+        victim["c"] = vc
+        victim["carried_by"] = 0
+
+        # Sync people with C++ core
+        self.sim._core.set_people(self.sim.victims, self.sim.agents[:1])
+        self.sim.tick(0)
+
+        # Mark pickup as already rewarded so agent does not get unearned pickup shaping
+        self.rewarded_pickups.add(0)
+        if self.reward_shaper is not None:
+            self.reward_shaper.rewarded_pickups.add(0)
+
+        # Populate memory map with physical observations along traveled path
+        self._populate_path_memory(path, exit_opening, (vr, vc))
 
     def action_masks(self):
         """Valid actions in Gymnasium action order; True means available."""
@@ -419,6 +562,12 @@ class RescueEnv(gym.Env):
                 self.reveal_victim = bool(options["reveal_victim"])
             if "observability_stage" in options:
                 self.observability_stage = str(options["observability_stage"])
+            if "task_type" in options:
+                self.task_type = str(options["task_type"]).lower()
+            if "discovery_reward" in options:
+                self.discovery_reward = float(options["discovery_reward"])
+
+        self._discovery_completed = False
 
         self.memory = MemoryMap(
             height=self.sim.h,
@@ -428,8 +577,10 @@ class RescueEnv(gym.Env):
             max_width=self.max_width,
         )
 
-        # Prefill privileged geometry or victim location if enabled by curriculum
-        if self.geometry_reveal_fraction > 0.0 or self.reveal_victim:
+        if self.task_type == "return":
+            self._setup_return_task()
+        elif self.geometry_reveal_fraction > 0.0 or self.reveal_victim:
+            # Prefill privileged geometry or victim location if enabled by curriculum
             full_geom = extract_full_building_geometry(self.sim)
             agent_pos = (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
             revealed_mask = get_connected_revealed_mask(
@@ -456,6 +607,7 @@ class RescueEnv(gym.Env):
             "geometry_reveal_fraction": self.geometry_reveal_fraction,
             "reveal_victim": self.reveal_victim,
             "observability_stage": self.observability_stage,
+            "task_type": self.task_type,
         }
 
         return observation, info
@@ -498,6 +650,14 @@ class RescueEnv(gym.Env):
         observation = self._get_observation()
         newly_uncovered = max(0, int(self.memory.explored.sum() - explored_before))
 
+        # Check auxiliary discovery task termination and reward
+        if self.task_type == "discovery":
+            victim_sighted = bool((observation["grid"][6] > 0).any())
+            if victim_sighted and not self._discovery_completed:
+                self._discovery_completed = True
+                reward += self.discovery_reward
+                terminated = True
+
         if self.reward_shaping:
             if self.reward_shaper is None:
                 self.reward_shaper = RewardShaper()
@@ -522,13 +682,23 @@ class RescueEnv(gym.Env):
             int(v["rescued"]) for v in result["victims"]
         )
 
+        task_success = (rescued == len(result["victims"])) or (
+            self.task_type == "discovery" and self._discovery_completed
+        )
+
         info = {
             "steps": self.steps,
             "victims_rescued": rescued,
-            "success": rescued == len(result["victims"]),
-            "is_success": rescued == len(result["victims"]),
+            "success": task_success,
+            "is_success": task_success,
             "timeout": truncated,
+            "task_type": self.task_type,
+            "discovery": self.victim_seen,
         }
+        if self.task_type == "discovery":
+            info["discovery_success"] = self._discovery_completed
+        elif self.task_type == "return":
+            info["return_success"] = (rescued == len(result["victims"]))
 
         return observation, reward, terminated, truncated, info
 
