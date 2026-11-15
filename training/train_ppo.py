@@ -227,11 +227,11 @@ class CurriculumRescueEnv(RescueEnv):
                 is_auxiliary_task = True
                 # Return training: sample deep victim distance tier
                 roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
-                if roll_tier < 0.20:
+                if roll_tier < 0.15:
                     self._apply_tier_config("medium")
-                elif roll_tier < 0.45:
+                elif roll_tier < 0.35:
                     self._apply_tier_config("bridge_a")
-                elif roll_tier < 0.70:
+                elif roll_tier < 0.65:
                     self._apply_tier_config("bridge_b")
                 elif roll_tier < 0.90:
                     self._apply_tier_config("bridge_c")
