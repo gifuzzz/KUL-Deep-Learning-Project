@@ -118,7 +118,8 @@ class RescueEnv(gym.Env):
                  min_victim_distance=1, navigation_shaping=False,
                  memory_agent_marker=False, exploration_bonus=0.0,
                  geometry_reveal_fraction=0.0, reveal_victim=False,
-                 observability_stage="A", task_type="full", discovery_reward=2.0):
+                 observability_stage="A", task_type="full", discovery_reward=2.0,
+                 return_mode="legacy", return_level=None):
         super().__init__()
 
         self.max_steps = max_steps
@@ -127,6 +128,10 @@ class RescueEnv(gym.Env):
         self.reward_shaping = reward_shaping
         self.navigation_shaping = navigation_shaping
         self.memory_agent_marker = memory_agent_marker
+        self.return_mode = str(return_mode).lower()
+        self.return_level = str(return_level).upper() if return_level is not None else None
+        self.current_return_level = None
+        self.current_return_mode = self.return_mode
         self.reward_shaper = RewardShaper() if reward_shaping else None
         if not np.isfinite(exploration_bonus) or exploration_bonus < 0:
             raise ValueError("exploration_bonus must be finite and nonnegative")
@@ -312,11 +317,79 @@ class RescueEnv(gym.Env):
         path.reverse()
         return path
 
-    def _populate_path_memory(self, path, exit_opening, victim_pos):
-        """Populate memory with ground-truth observations along the traversed corridor.
+    def _explore_side_branches(
+        self,
+        main_path: list[tuple[int, int]],
+        num_branches: int = 2,
+        branch_depth: int = 5,
+        rng=None,
+    ) -> set[tuple[int, int]]:
+        """Sample realistic exploration side branches off the main path.
 
-        Only the path from the exit to the victim, its adjacent visible cells,
-        the exit portal, and the victim are marked explored. Unvisited rooms remain unknown (0.0).
+        Simulates legitimate prior exploration into side rooms/corridors that were
+        checked and abandoned before reaching the victim. Every branch cell is physically
+        passable and connected to the main path.
+        """
+        if num_branches <= 0 or len(main_path) <= 2:
+            return set()
+
+        sim = self.sim
+        path_set = set(main_path)
+        h, w = sim.h, sim.w
+        branch_cells = set()
+
+        candidate_forks = []
+        for r, c in main_path[1:-1]:
+            neighbors = (
+                (r - 1, c, r > 0 and sim.south[r - 1, c] >= 0.5),
+                (r, c + 1, c + 1 < w and sim.east[r, c] >= 0.5),
+                (r + 1, c, r + 1 < h and sim.south[r, c] >= 0.5),
+                (r, c - 1, c > 0 and sim.east[r, c - 1] >= 0.5),
+            )
+            for nr, nc, passable in neighbors:
+                if passable and (nr, nc) not in path_set and not sim.debris[nr, nc]:
+                    candidate_forks.append((nr, nc))
+
+        if not candidate_forks:
+            return branch_cells
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        perm = rng.permutation(len(candidate_forks))[:num_branches]
+        for idx in perm:
+            fork_start = candidate_forks[idx]
+            queue = deque([(fork_start[0], fork_start[1], 1)])
+            b_visited = {fork_start}
+            while queue:
+                br, bc, depth = queue.popleft()
+                branch_cells.add((br, bc))
+                if depth >= branch_depth:
+                    continue
+                b_nbrs = (
+                    (br - 1, bc, br > 0 and sim.south[br - 1, bc] >= 0.5),
+                    (br, bc + 1, bc + 1 < w and sim.east[br, bc] >= 0.5),
+                    (br + 1, bc, br + 1 < h and sim.south[br, bc] >= 0.5),
+                    (br, bc - 1, bc > 0 and sim.east[br, bc - 1] >= 0.5),
+                )
+                for nbr_r, nbr_c, passable in b_nbrs:
+                    if (
+                        passable
+                        and (nbr_r, nbr_c) not in path_set
+                        and (nbr_r, nbr_c) not in b_visited
+                        and not sim.debris[nbr_r, nbr_c]
+                    ):
+                        b_visited.add((nbr_r, nbr_c))
+                        queue.append((nbr_r, nbr_c, depth + 1))
+
+        return branch_cells
+
+    def _populate_path_memory(self, path, exit_opening, victim_pos, additional_cells=None):
+        """Populate memory with ground-truth observations along traversed corridors and explored branches.
+
+        Only the path from the exit to the victim, any legitimately explored side branches,
+        their adjacent visible open cells, the exit portal, and the victim are marked explored.
+        Unvisited rooms remain strictly unknown (0.0).
         """
         e = self.sim
         # Mark exit opening portal cells
@@ -332,8 +405,11 @@ class RescueEnv(gym.Env):
                 )
                 self.memory.grid[face, er, ec] = 1.0
 
-        # Mark all cells along the path as explored and populate ground truth passability
-        for r, c in path:
+        all_explored_cells = list(path)
+        if additional_cells:
+            all_explored_cells.extend(additional_cells)
+
+        for r, c in all_explored_cells:
             if 0 <= r < self.memory.height and 0 <= c < self.memory.width:
                 self.memory.grid[0, r, c] = float(e.south[r - 1, c] >= 0.5 if r > 0 else 0)
                 self.memory.grid[1, r, c] = float(e.east[r, c] >= 0.5 if c + 1 < e.w else 0)
@@ -364,9 +440,22 @@ class RescueEnv(gym.Env):
         if 0 <= vr < self.memory.height and 0 <= vc < self.memory.width:
             self.memory.grid[6, vr, vc] = 1.0
 
-    def _setup_return_task(self):
+    def _setup_return_task(
+        self,
+        return_level: str | None = None,
+        return_mode: str = "legacy",
+        rng=None,
+    ):
         """Configure scenario where agent is already carrying victim deep inside the building,
-        with remembered map physically consistent with path traveled from an exit portal."""
+        with remembered map physically consistent with path traveled from an exit portal.
+
+        Supports Route-Complexity levels:
+        - R1: Short, simple return (d=2..4, 0 branches, direct corridor)
+        - R2: Longer corridor return (d=6..8, 1 short branch, 2-3 turns, doorways)
+        - R3: Branching multi-room return (d=10..12, 2 branches, doorways & intersections)
+        - R4: Realistic distant pickup states (d>=12/distant, 2-3 deep branches, multi-room)
+        - legacy: Phase 3 direct single-corridor return
+        """
         if len(self.sim.victims) == 0:
             return
 
@@ -404,8 +493,52 @@ class RescueEnv(gym.Env):
         if self.reward_shaper is not None:
             self.reward_shaper.rewarded_pickups.add(0)
 
-        # Populate memory map with physical observations along traveled path
-        self._populate_path_memory(path, exit_opening, (vr, vc))
+        # Route-complexity configuration
+        num_branches = 0
+        branch_depth = 0
+        effective_level = return_level
+
+        if return_mode == "route_complexity":
+            if effective_level is None:
+                plen = len(path)
+                if plen <= 4:
+                    effective_level = "R1"
+                elif plen <= 8:
+                    effective_level = "R2"
+                elif plen <= 12:
+                    effective_level = "R3"
+                else:
+                    effective_level = "R4"
+
+            if effective_level == "R1":
+                num_branches = 0
+                branch_depth = 0
+            elif effective_level == "R2":
+                num_branches = 1
+                branch_depth = 4
+            elif effective_level == "R3":
+                num_branches = 2
+                branch_depth = 6
+            elif effective_level == "R4":
+                num_branches = 3
+                branch_depth = 8
+        else:
+            effective_level = "legacy"
+
+        self.current_return_level = effective_level
+        self.current_return_mode = return_mode
+
+        branch_cells = set()
+        if num_branches > 0:
+            branch_cells = self._explore_side_branches(
+                path,
+                num_branches=num_branches,
+                branch_depth=branch_depth,
+                rng=rng,
+            )
+
+        # Populate memory map with physical observations along traveled path + branches
+        self._populate_path_memory(path, exit_opening, (vr, vc), additional_cells=branch_cells)
 
     def action_masks(self):
         """Valid actions in Gymnasium action order; True means available."""
@@ -566,6 +699,10 @@ class RescueEnv(gym.Env):
                 self.task_type = str(options["task_type"]).lower()
             if "discovery_reward" in options:
                 self.discovery_reward = float(options["discovery_reward"])
+            if "return_mode" in options:
+                self.return_mode = str(options["return_mode"]).lower()
+            if "return_level" in options:
+                self.return_level = str(options["return_level"]).upper()
 
         self._discovery_completed = False
 
@@ -578,7 +715,9 @@ class RescueEnv(gym.Env):
         )
 
         if self.task_type == "return":
-            self._setup_return_task()
+            r_level = options.get("return_level") if (options and "return_level" in options) else getattr(self, "return_level", None)
+            r_mode = options.get("return_mode") if (options and "return_mode" in options) else getattr(self, "return_mode", "legacy")
+            self._setup_return_task(return_level=r_level, return_mode=r_mode, rng=episode_rng)
         elif self.geometry_reveal_fraction > 0.0 or self.reveal_victim:
             # Prefill privileged geometry or victim location if enabled by curriculum
             full_geom = extract_full_building_geometry(self.sim)
@@ -608,6 +747,8 @@ class RescueEnv(gym.Env):
             "reveal_victim": self.reveal_victim,
             "observability_stage": self.observability_stage,
             "task_type": self.task_type,
+            "return_mode": self.current_return_mode if self.task_type == "return" else None,
+            "return_level": self.current_return_level if self.task_type == "return" else None,
         }
 
         return observation, info

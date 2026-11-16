@@ -130,6 +130,7 @@ class CurriculumRescueEnv(RescueEnv):
         enable_multitask: bool = False,
         task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
         discovery_reward: float = 2.0,
+        return_mode: str = "legacy",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -146,6 +147,7 @@ class CurriculumRescueEnv(RescueEnv):
         self.enable_multitask = bool(enable_multitask)
         self.task_mixture = tuple(task_mixture) if task_mixture is not None else (0.50, 0.25, 0.25)
         self.discovery_reward = float(discovery_reward)
+        self.return_mode = str(return_mode).lower()
 
     def _update_active_bridge(self, substage: str) -> None:
         if substage == "2C_bridge8":
@@ -182,12 +184,15 @@ class CurriculumRescueEnv(RescueEnv):
         enable: bool = True,
         task_mixture: tuple[float, float, float] | None = None,
         discovery_reward: float | None = None,
+        return_mode: str | None = None,
     ) -> None:
         self.enable_multitask = bool(enable)
         if task_mixture is not None:
             self.task_mixture = tuple(task_mixture)
         if discovery_reward is not None:
             self.discovery_reward = float(discovery_reward)
+        if return_mode is not None:
+            self.return_mode = str(return_mode).lower()
 
     def reset(self, *, seed=None, options=None):
         if options is None:
@@ -212,6 +217,8 @@ class CurriculumRescueEnv(RescueEnv):
             self.task_mixture = tuple(options["task_mixture"])
         if "discovery_reward" in options:
             self.discovery_reward = float(options["discovery_reward"])
+        if "return_mode" in options:
+            self.return_mode = str(options["return_mode"]).lower()
 
         rng = getattr(self, "np_random", None)
         roll = float(rng.random()) if rng is not None else float(np.random.random())
@@ -225,18 +232,36 @@ class CurriculumRescueEnv(RescueEnv):
             elif roll_task < p_full + p_return:
                 options["task_type"] = "return"
                 is_auxiliary_task = True
-                # Return training: sample deep victim distance tier
-                roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
-                if roll_tier < 0.15:
-                    self._apply_tier_config("medium")
-                elif roll_tier < 0.35:
-                    self._apply_tier_config("bridge_a")
-                elif roll_tier < 0.65:
-                    self._apply_tier_config("bridge_b")
-                elif roll_tier < 0.90:
-                    self._apply_tier_config("bridge_c")
+                options["return_mode"] = self.return_mode
+                if self.return_mode == "route_complexity":
+                    # Sample route-complexity levels R1..R4
+                    roll_r = float(rng.random()) if rng is not None else float(np.random.random())
+                    if roll_r < 0.15:
+                        options["return_level"] = "R1"
+                        self._apply_tier_config("near")
+                    elif roll_r < 0.40:
+                        options["return_level"] = "R2"
+                        self._apply_tier_config("medium")
+                    elif roll_r < 0.70:
+                        options["return_level"] = "R3"
+                        self._apply_tier_config("bridge_b")
+                    else:
+                        options["return_level"] = "R4"
+                        self._apply_tier_config("distant")
                 else:
-                    self._apply_tier_config("distant")
+                    options["return_mode"] = "legacy"
+                    # Legacy Phase 3 return tier sampling
+                    roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                    if roll_tier < 0.15:
+                        self._apply_tier_config("medium")
+                    elif roll_tier < 0.35:
+                        self._apply_tier_config("bridge_a")
+                    elif roll_tier < 0.65:
+                        self._apply_tier_config("bridge_b")
+                    elif roll_tier < 0.90:
+                        self._apply_tier_config("bridge_c")
+                    else:
+                        self._apply_tier_config("distant")
             else:
                 options["task_type"] = "discovery"
                 is_auxiliary_task = True
@@ -471,12 +496,13 @@ def set_env_multitask(
     enable: bool = True,
     task_mixture: tuple[float, float, float] | None = None,
     discovery_reward: float | None = None,
+    return_mode: str | None = None,
 ) -> None:
     """Configure multi-task training across vectorized environments."""
     if hasattr(env, "env_method"):
-        env.env_method("set_multitask", enable, task_mixture, discovery_reward)
+        env.env_method("set_multitask", enable, task_mixture, discovery_reward, return_mode)
     elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "set_multitask"):
-        env.unwrapped.set_multitask(enable, task_mixture, discovery_reward)
+        env.unwrapped.set_multitask(enable, task_mixture, discovery_reward, return_mode)
 
 
 def make_single_train_env(
@@ -490,6 +516,7 @@ def make_single_train_env(
     enable_multitask: bool = False,
     task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
     discovery_reward: float = 2.0,
+    return_mode: str = "legacy",
     seed: int | None = None,
 ):
     """Factory creating an individual monitored environment."""
@@ -505,6 +532,7 @@ def make_single_train_env(
             enable_multitask=enable_multitask,
             task_mixture=task_mixture,
             discovery_reward=discovery_reward,
+            return_mode=return_mode,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -525,6 +553,7 @@ def make_train_env(
     enable_multitask: bool = False,
     task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
     discovery_reward: float = 2.0,
+    return_mode: str = "legacy",
     n_envs: int = 8,
     base_seed: int = 42,
 ) -> DummyVecEnv | Monitor:
@@ -544,6 +573,7 @@ def make_train_env(
             enable_multitask=enable_multitask,
             task_mixture=task_mixture,
             discovery_reward=discovery_reward,
+            return_mode=return_mode,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -560,6 +590,7 @@ def make_train_env(
             enable_multitask=enable_multitask,
             task_mixture=task_mixture,
             discovery_reward=discovery_reward,
+            return_mode=return_mode,
             seed=base_seed + i * 1000,
         )
         for i in range(n_envs)
@@ -1393,6 +1424,13 @@ def parse_args():
         help="Auxiliary reward awarded on legitimate first discovery in discovery task (default: 2.0)",
     )
     parser.add_argument(
+        "--return-mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "route_complexity"],
+        help="Return task generation mode: 'legacy' (Phase 3 single corridor) or 'route_complexity' (Phase 4 R1..R4 with branching memory)",
+    )
+    parser.add_argument(
         "--skip-qualification-gate",
         action="store_true",
         help="Skip strict >=90%% qualification gate failure check (useful for test runs)",
@@ -1432,7 +1470,7 @@ def main():
         parts = [float(p.strip()) for p in args.task_mixture.split(",")]
         total = sum(parts)
         task_mixture = tuple(p / total for p in parts)
-        print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery), discovery_reward={args.discovery_reward}")
+        print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery), return_mode={args.return_mode}, discovery_reward={args.discovery_reward}")
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -1457,6 +1495,7 @@ def main():
         "multi_task": args.multi_task,
         "task_mixture": task_mixture,
         "discovery_reward": args.discovery_reward,
+        "return_mode": args.return_mode,
     }
 
     # Determine timesteps for stages
@@ -1499,6 +1538,7 @@ def main():
         enable_multitask=args.multi_task,
         task_mixture=task_mixture,
         discovery_reward=args.discovery_reward,
+        return_mode=args.return_mode,
         n_envs=args.n_envs,
         base_seed=args.seed,
     )
