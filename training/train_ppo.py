@@ -352,35 +352,49 @@ class CurriculumRescueEnv(RescueEnv):
             elif is_stage3:
                 # Stage 3 Spawn-Relative Distance Curriculum
                 if self.substage == "reinforce_spawn_near":
-                    if roll < 0.60:
+                    if roll < 0.45:
                         self._apply_tier_config("spawn_2_6")
-                    elif roll < 0.90:
-                        self._apply_tier_config("spawn_7_12")
-                    else:
-                        self._apply_tier_config("spawn_13_20")
-                elif self.substage == "reinforce_spawn_mid":
-                    if roll < 0.30:
-                        self._apply_tier_config("spawn_2_6")
-                    elif roll < 0.75:
-                        self._apply_tier_config("spawn_7_12")
-                    else:
-                        self._apply_tier_config("spawn_13_20")
-                elif self.substage in ("3A", "3_tier1"):
-                    if roll < 0.40:
-                        self._apply_tier_config("spawn_2_6")
-                    elif roll < 0.80:
-                        self._apply_tier_config("spawn_7_12")
-                    else:
-                        self._apply_tier_config("spawn_13_20")
-                elif self.substage in ("3B", "3_tier2"):
-                    if roll < 0.20:
-                        self._apply_tier_config("spawn_2_6")
-                    elif roll < 0.50:
+                    elif roll < 0.70:
                         self._apply_tier_config("spawn_7_12")
                     elif roll < 0.85:
                         self._apply_tier_config("spawn_13_20")
-                    else:
+                    elif roll < 0.95:
                         self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
+                elif self.substage == "reinforce_spawn_mid":
+                    if roll < 0.25:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.65:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.85:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll < 0.95:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
+                elif self.substage in ("3A", "3_tier1"):
+                    if roll < 0.30:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.65:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.80:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll < 0.90:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
+                elif self.substage in ("3B", "3_tier2"):
+                    if roll < 0.20:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.45:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.75:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll < 0.90:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
                 elif self.substage in ("3C", "3_tier3"):
                     if roll < 0.15:
                         self._apply_tier_config("spawn_2_6")
@@ -397,9 +411,9 @@ class CurriculumRescueEnv(RescueEnv):
                         self._apply_tier_config("spawn_2_6")
                     elif roll < 0.35:
                         self._apply_tier_config("spawn_7_12")
-                    elif roll < 0.60:
+                    elif roll < 0.55:
                         self._apply_tier_config("spawn_13_20")
-                    elif roll < 0.85:
+                    elif roll < 0.80:
                         self._apply_tier_config("spawn_21_35")
                     else:
                         self._apply_tier_config("spawn_distant")
@@ -1565,6 +1579,12 @@ def parse_args():
     parser.add_argument("--ent-coef", type=float, default=0.001, help="Entropy coefficient (default: 0.001)")
     parser.add_argument("--eval-freq", type=int, default=5_000, help="Evaluation frequency in steps (default: 5,000)")
     parser.add_argument("--n-eval-episodes", type=int, default=20, help="Episodes per evaluation (default: 20)")
+    parser.add_argument(
+        "--eval-deterministic",
+        action="store_true",
+        default=False,
+        help="Use deterministic policy during evaluation callback (default: False / stochastic)",
+    )
     parser.add_argument("--save-dir", type=str, default="./models/curriculum", help="Directory to save models")
     parser.add_argument(
         "--save-model",
@@ -2033,7 +2053,7 @@ def main():
                 best_model_save_path=stage3_dir,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.n_eval_episodes,
-                deterministic=True,
+                deterministic=args.eval_deterministic,
                 hyperparameters=hyperparameters,
                 seed_start=50000,
                 checkpoint_freq=args.checkpoint_freq,

@@ -65,7 +65,7 @@ def test_curriculum_env_stage3_reset_ladder():
         assert obs["grid"].shape == (9, 15, 15)
         assert obs["memory"].shape == (9, 40, 52)
         assert env.distance_metric == "spawn"
-        assert env.victim_distance in (6, 12, 20)
+        assert env.victim_distance in (6, 12, 20, 35, None)
 
 
 def test_curriculum_env_stage3_multitask_integration():
