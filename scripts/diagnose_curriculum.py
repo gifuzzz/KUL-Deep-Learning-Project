@@ -107,10 +107,14 @@ def evaluate_tier(
     pickups = []
     rescues = []
     rescues_after_pickup = []
+    timeouts = []
     timeouts_while_carrying = []
     successful_lengths = []
     total_steps = 0
     total_oscillations = 0
+    total_wasted_actions = 0
+    total_action6_count = 0
+    total_action0_count = 0
 
     for ep in range(n_episodes):
         seed = seed_start + ep
@@ -123,7 +127,8 @@ def evaluate_tier(
         ep_ever_picked_up = False
         ep_carrying = False
         step_count = 0
-        pos_history = []
+        init_pos = (env.unwrapped.sim.agents[0]["r"], env.unwrapped.sim.agents[0]["c"])
+        pos_history = [init_pos]
         action_history = []
 
         gru_states = None
@@ -140,6 +145,10 @@ def evaluate_tier(
             episode_starts = np.zeros((1,), dtype=bool)
             act_int = int(action)
             action_history.append(act_int)
+            if act_int == 6:
+                total_action6_count += 1
+            elif act_int == 0:
+                total_action0_count += 1
 
             obs, reward, terminated, truncated, info = env.step(act_int)
             step_count += 1
@@ -149,8 +158,13 @@ def evaluate_tier(
             agent_pos = (env.unwrapped.sim.agents[0]["r"], env.unwrapped.sim.agents[0]["c"])
             pos_history.append(agent_pos)
 
+            # Check wasted action (no position change and not a successful pickup action)
+            if pos_history[-1] == pos_history[-2]:
+                if act_int != 5:
+                    total_wasted_actions += 1
+
             # Check 2-step oscillation (A -> B -> A) or immediate reversal action
-            if len(pos_history) >= 3 and pos_history[-1] == pos_history[-3]:
+            if len(pos_history) >= 4 and pos_history[-1] == pos_history[-3]:
                 total_oscillations += 1
             elif len(action_history) >= 2 and OPPOSITE_ACTIONS.get(action_history[-1]) == action_history[-2]:
                 total_oscillations += 1
@@ -173,6 +187,7 @@ def evaluate_tier(
         if ep_ever_picked_up or is_success:
             rescues_after_pickup.append(is_success)
         rescues.append(is_success)
+        timeouts.append(is_timeout)
         timeouts_while_carrying.append(is_timeout and ep_carrying)
         if is_success:
             successful_lengths.append(step_count)
@@ -185,9 +200,13 @@ def evaluate_tier(
         "pickup_rate": float(np.mean(pickups)) * 100.0,
         "rescue_success": float(np.mean(rescues)) * 100.0,
         "return_success_after_pickup": float(np.mean(rescues_after_pickup)) * 100.0 if rescues_after_pickup else 0.0,
+        "timeout_rate": float(np.mean(timeouts)) * 100.0,
         "timeout_while_carrying": float(np.mean(timeouts_while_carrying)) * 100.0,
         "mean_successful_length": float(np.mean(successful_lengths)) if successful_lengths else 0.0,
         "oscillation_frequency": osc_freq * 100.0,
+        "wasted_action_rate": float(total_wasted_actions / max(1, total_steps)) * 100.0,
+        "action6_rate": float(total_action6_count / max(1, total_steps)) * 100.0,
+        "action0_wait_rate": float(total_action0_count / max(1, total_steps)) * 100.0,
     }
 
 
@@ -248,7 +267,7 @@ def _eval_worker(task):
     print(
         f"[{tier_name}] {mode_str:<13}: Rescue={res['rescue_success']:>5.1f}%, "
         f"Pick={res['pickup_rate']:>5.1f}%, Disc={res['discovery_rate']:>5.1f}%, "
-        f"Osc={res['oscillation_frequency']:>4.1f}%",
+        f"Osc={res['oscillation_frequency']:>4.1f}%, Wasted={res['wasted_action_rate']:>4.1f}%, Act6={res['action6_rate']:>4.1f}%",
         flush=True,
     )
     return tier_name, mode_str, res
@@ -313,7 +332,7 @@ def run_full_diagnosis(
             distance_metric=distance_metric,
             geometry_mode=geometry_mode,
         )
-        print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%", flush=True)
+        print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%, Wasted={det['wasted_action_rate']:>4.1f}%, Act6={det['action6_rate']:>4.1f}%", flush=True)
         stoch = evaluate_tier(
             model,
             victim_distance=dist,
@@ -329,7 +348,7 @@ def run_full_diagnosis(
             distance_metric=distance_metric,
             geometry_mode=geometry_mode,
         )
-        print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%", flush=True)
+        print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%, Wasted={stoch['wasted_action_rate']:>4.1f}%, Act6={stoch['action6_rate']:>4.1f}%", flush=True)
         results[tier_name] = {
             "deterministic": det,
             "stochastic": stoch,
@@ -338,12 +357,12 @@ def run_full_diagnosis(
 
 
 def print_table(results: dict, title: str):
-    print("\n" + "=" * 95)
+    print("\n" + "=" * 115)
     print(f"DIAGNOSTIC BENCHMARK: {title}")
-    print("=" * 95)
-    header = f"{'Tier':<28} | {'Mode':<5} | {'Disc%':<6} | {'Pick%':<6} | {'Resc%':<6} | {'Ret|Pick%':<9} | {'T/O Carr%':<9} | {'AvgLen':<6} | {'Osc%':<5}"
+    print("=" * 115)
+    header = f"{'Tier':<28} | {'Mode':<5} | {'Disc%':<6} | {'Pick%':<6} | {'Resc%':<6} | {'Ret|Pick%':<9} | {'T/O Carr%':<9} | {'AvgLen':<6} | {'Osc%':<5} | {'Wasted%':<7} | {'Act6%':<5}"
     print(header)
-    print("-" * 95)
+    print("-" * 115)
     for tier_name, modes in results.items():
         for mode, m in modes.items():
             m_label = "Det" if mode == "deterministic" else "Stoch"
@@ -355,9 +374,11 @@ def print_table(results: dict, title: str):
                 f"{m['return_success_after_pickup']:>8.1f}% | "
                 f"{m['timeout_while_carrying']:>8.1f}% | "
                 f"{m['mean_successful_length']:>6.1f} | "
-                f"{m['oscillation_frequency']:>4.1f}%"
+                f"{m['oscillation_frequency']:>4.1f}% | "
+                f"{m['wasted_action_rate']:>6.1f}% | "
+                f"{m['action6_rate']:>4.1f}%"
             )
-    print("=" * 95)
+    print("=" * 115)
 
 
 if __name__ == "__main__":

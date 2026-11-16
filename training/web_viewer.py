@@ -16,7 +16,7 @@ from rescue_env.envs.single_agent import RescueEnv
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = Path(__file__).with_name("viewer")
 ACTION_NAMES = ("Wait", "Move up", "Move right", "Move down", "Move left",
-                "Pick up / drop", "Rescue outside")
+                "Pick up / drop", "Water Hose")
 FEATURE_NAMES = ("Row / height", "Column / width", "Health", "Role / 3", "Carrying victim")
 NATIVE_LAYERS = (
     ("Oxygen", "Available oxygen", "#6b9faa"),

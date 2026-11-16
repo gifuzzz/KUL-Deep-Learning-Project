@@ -120,7 +120,8 @@ class RescueEnv(gym.Env):
                  geometry_reveal_fraction=0.0, reveal_victim=False,
                  observability_stage="A", task_type="full", discovery_reward=2.0,
                  return_mode="legacy", return_level=None, distance_metric="exit",
-                 prevent_exterior_wandering=True, geometry_mode="edge"):
+                 prevent_exterior_wandering=True, geometry_mode="edge",
+                 fire_suppression_enabled=False):
         super().__init__()
 
         self.max_steps = max_steps
@@ -142,6 +143,7 @@ class RescueEnv(gym.Env):
             raise ValueError(f"Unknown distance_metric: '{distance_metric}'. Valid: 'exit', 'spawn'")
         self.distance_metric = str(distance_metric).lower()
         self.prevent_exterior_wandering = bool(prevent_exterior_wandering)
+        self.fire_suppression_enabled = bool(fire_suppression_enabled)
         if str(geometry_mode).lower() not in ("edge", "legacy_cell"):
             raise ValueError(f"Unknown geometry_mode: '{geometry_mode}'. Valid: 'edge', 'legacy_cell'")
         self.geometry_mode = str(geometry_mode).lower()
@@ -587,7 +589,12 @@ class RescueEnv(gym.Env):
             not carrying
             and any(v["carried_by"] < 0 for v in nearby)
         )
-        mask[6] = True
+        fire_active = (
+            getattr(self, "fire_suppression_enabled", False)
+            or getattr(self.sim, "ignitions", 0) > 0
+            or (hasattr(self.sim, "fire") and bool((self.sim.fire > 0).any()))
+        )
+        mask[6] = bool(fire_active)
 
         if self.prevent_exterior_wandering and not carrying:
             pr, pc = person["r"], person["c"]
@@ -706,6 +713,8 @@ class RescueEnv(gym.Env):
                 if gm not in ("edge", "legacy_cell"):
                     raise ValueError(f"Unknown geometry_mode: '{gm}'. Valid: 'edge', 'legacy_cell'")
                 self.geometry_mode = gm
+            if "fire_suppression_enabled" in options:
+                self.fire_suppression_enabled = bool(options["fire_suppression_enabled"])
 
         # Generate a reproducible episode seed
         episode_seed = int(

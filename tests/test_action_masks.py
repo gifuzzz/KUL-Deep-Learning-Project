@@ -16,8 +16,8 @@ def test_initial_action_masks():
         # Waiting is always permitted for a living firefighter.
         assert mask[0]
 
-        # Water action should be available.
-        assert mask[6]
+        # Action 6 (Water Hose) is masked out in fireless environments.
+        assert not mask[6]
 
         # Victim starts too far away to pick up.
         assert not mask[5]
@@ -81,20 +81,21 @@ def test_pickup_mask():
 
 
 def test_water_mask():
+    # Fireless environment: Action 6 should be masked out
     env = RescueEnv()
-
     try:
         env.reset(seed=42)
-
         assert env.ACTIONS[6] == 5
-        assert env.action_masks()[6]
-
-        # Check that the action executes.
-        obs, reward, terminated, truncated, info = env.step(6)
-
-        assert env.observation_space.contains(obs)
-        assert not terminated
-        assert not truncated
-
+        assert not env.action_masks()[6]
     finally:
         env.close()
+
+    # Fire-suppression enabled environment: Action 6 should be available
+    env_fire = RescueEnv(fire_suppression_enabled=True)
+    try:
+        env_fire.reset(seed=42)
+        assert env_fire.action_masks()[6]
+        obs, reward, terminated, truncated, info = env_fire.step(6)
+        assert env_fire.observation_space.contains(obs)
+    finally:
+        env_fire.close()

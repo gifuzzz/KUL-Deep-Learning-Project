@@ -10,7 +10,7 @@ const ACTION_NAMES = [
   "Move Down",
   "Move Left",
   "Pick Up / Drop",
-  "Rescue Outside",
+  "Water Hose",
 ];
 
 const MEMORY_CHANNEL_NAMES = [

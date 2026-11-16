@@ -121,8 +121,8 @@ def test_legal_action_masks_7dim_bool():
         # Action 0 (Wait) is always legal for living firefighter
         assert bool(mask[0]) is True
 
-        # Action 6 (Water / drop) is legal
-        assert bool(mask[6]) is True
+        # Action 6 (Water Hose) is masked out in fireless rescue
+        assert bool(mask[6]) is False
 
         # Action 5 (Pickup) is initially False when no victim is adjacent
         assert bool(mask[5]) is False
