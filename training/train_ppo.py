@@ -251,7 +251,11 @@ class CurriculumRescueEnv(RescueEnv):
         is_stage3 = (self.stage in (3, "3", "SPAWN") or str(self.substage).startswith("3") or str(self.substage).startswith("reinforce_spawn"))
         if self.enable_multitask:
             roll_task = float(rng.random()) if rng is not None else float(np.random.random())
-            p_full, p_return, p_discovery = self.task_mixture
+            p_full = self.task_mixture[0]
+            p_return = self.task_mixture[1]
+            p_discovery = self.task_mixture[2]
+            p_explore = self.task_mixture[3] if len(self.task_mixture) > 3 else 0.0
+
             if roll_task < p_full:
                 options["task_type"] = "full"
             elif roll_task < p_full + p_return:
@@ -314,7 +318,7 @@ class CurriculumRescueEnv(RescueEnv):
                             self._apply_tier_config("bridge_c")
                         else:
                             self._apply_tier_config("distant")
-            else:
+            elif roll_task < p_full + p_return + p_discovery:
                 options["task_type"] = "discovery"
                 is_auxiliary_task = True
                 if is_stage3:
@@ -338,6 +342,14 @@ class CurriculumRescueEnv(RescueEnv):
                         self._apply_tier_config("bridge_c")
                     else:
                         self._apply_tier_config("distant")
+            else:
+                options["task_type"] = "exploration_only"
+                is_auxiliary_task = True
+                options["max_steps"] = 384
+                if is_stage3:
+                    self._apply_tier_config("spawn_distant")
+                else:
+                    self._apply_tier_config("distant")
 
             options["discovery_reward"] = self.discovery_reward
         else:
@@ -647,7 +659,7 @@ def make_single_train_env(
     observability_mode: str = "A",
     observability_stage: str = "B1",
     enable_multitask: bool = False,
-    task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    task_mixture: tuple[float, ...] = (0.50, 0.25, 0.25),
     discovery_reward: float = 2.0,
     return_mode: str = "legacy",
     seed: int | None = None,
@@ -655,6 +667,7 @@ def make_single_train_env(
     distance_metric: str = "exit",
 ):
     """Factory creating an individual monitored environment."""
+
     def _init():
         env = CurriculumRescueEnv(
             stage=stage,
@@ -674,7 +687,7 @@ def make_single_train_env(
         env = PreviousActionWrapper(env)
         if seed is not None:
             env.reset(seed=seed)
-        return Monitor(env, info_keywords=("success", "timeout"))
+        return Monitor(env, info_keywords=("success", "timeout", "task_type", "observed_coverage", "visited_coverage", "unique_rooms_entered", "doorway_reversals"))
 
     return _init
 
@@ -688,7 +701,7 @@ def make_train_env(
     observability_mode: str = "A",
     observability_stage: str = "B1",
     enable_multitask: bool = False,
-    task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    task_mixture: tuple[float, ...] = (0.50, 0.25, 0.25),
     discovery_reward: float = 2.0,
     return_mode: str = "legacy",
     n_envs: int = 8,
@@ -719,7 +732,7 @@ def make_train_env(
             distance_metric=distance_metric,
         )
         env = PreviousActionWrapper(env)
-        return Monitor(env, info_keywords=("success", "timeout"))
+        return Monitor(env, info_keywords=("success", "timeout", "task_type", "observed_coverage", "visited_coverage", "unique_rooms_entered", "doorway_reversals"))
 
     env_fns = [
         make_single_train_env(
@@ -1735,7 +1748,10 @@ def main():
         parts = [float(p.strip()) for p in args.task_mixture.split(",")]
         total = sum(parts)
         task_mixture = tuple(p / total for p in parts)
-        print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery), return_mode={args.return_mode}, discovery_reward={args.discovery_reward}")
+        if len(task_mixture) == 4:
+            print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery, Exploration), return_mode={args.return_mode}, discovery_reward={args.discovery_reward}")
+        else:
+            print(f"Multi-Task Curriculum ENABLED: mixture={task_mixture} (Full, Return, Discovery), return_mode={args.return_mode}, discovery_reward={args.discovery_reward}")
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)

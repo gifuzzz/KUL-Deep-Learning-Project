@@ -121,7 +121,10 @@ class RescueEnv(gym.Env):
                  observability_stage="A", task_type="full", discovery_reward=2.0,
                  return_mode="legacy", return_level=None, distance_metric="exit",
                  prevent_exterior_wandering=True, geometry_mode="edge",
-                 fire_suppression_enabled=False):
+                 fire_suppression_enabled=False,
+                 coverage_target=0.90, exploration_cell_bonus=0.05,
+                 exploration_edge_bonus=0.02, max_exploration_reward=6.0,
+                 exploration_step_penalty=0.001, oscillation_penalty=0.02):
         super().__init__()
 
         self.max_steps = max_steps
@@ -152,20 +155,28 @@ class RescueEnv(gym.Env):
         self.reveal_victim = bool(reveal_victim)
         self.observability_stage = str(observability_stage)
 
-        if str(task_type).lower() not in ("full", "return", "discovery"):
-            raise ValueError(f"Unknown task_type: '{task_type}'. Valid: 'full', 'return', 'discovery'")
+        if str(task_type).lower() not in ("full", "return", "discovery", "exploration_only"):
+            raise ValueError(f"Unknown task_type: '{task_type}'. Valid: 'full', 'return', 'discovery', 'exploration_only'")
         self.task_type = str(task_type).lower()
         self.discovery_reward = float(discovery_reward)
         self._discovery_completed = False
+
+        self.coverage_target = float(coverage_target)
+        self.exploration_cell_bonus = float(exploration_cell_bonus)
+        self.exploration_edge_bonus = float(exploration_edge_bonus)
+        self.max_exploration_reward = float(max_exploration_reward)
+        self.exploration_step_penalty = float(exploration_step_penalty)
+        self.oscillation_penalty = float(oscillation_penalty)
 
         self.fixed_seed = fixed_seed
         self.min_victim_distance = min_victim_distance
         self.memory = None
 
-        if (not isinstance(min_victim_distance, int) or min_victim_distance < 1
-                or (victim_distance is not None and min_victim_distance > victim_distance)
-                or (victim_distance is None and min_victim_distance > 1)):
-            raise ValueError("Require 1 <= min_victim_distance <= victim_distance")
+        if self.task_type != "exploration_only":
+            if (not isinstance(min_victim_distance, int) or min_victim_distance < 1
+                    or (victim_distance is not None and min_victim_distance > victim_distance)
+                    or (victim_distance is None and min_victim_distance > 1)):
+                raise ValueError("Require 1 <= min_victim_distance <= victim_distance")
         self.scenario_seeds = tuple(scenario_seeds) if scenario_seeds is not None else None
         if self.scenario_seeds is not None:
             if fixed_seed is not None:
@@ -585,10 +596,13 @@ class RescueEnv(gym.Env):
             for v in self.sim.victims
         )
 
-        mask[5] = (
-            not carrying
-            and any(v["carried_by"] < 0 for v in nearby)
-        )
+        if self.task_type == "exploration_only":
+            mask[5] = False
+        else:
+            mask[5] = (
+                not carrying
+                and any(v["carried_by"] < 0 for v in nearby)
+            )
         fire_active = (
             getattr(self, "fire_suppression_enabled", False)
             or getattr(self.sim, "ignitions", 0) > 0
@@ -715,17 +729,33 @@ class RescueEnv(gym.Env):
                 self.geometry_mode = gm
             if "fire_suppression_enabled" in options:
                 self.fire_suppression_enabled = bool(options["fire_suppression_enabled"])
+            if "task_type" in options:
+                tt = str(options["task_type"]).lower()
+                if tt not in ("full", "return", "discovery", "exploration_only"):
+                    raise ValueError(f"Unknown task_type: '{tt}'. Valid: 'full', 'return', 'discovery', 'exploration_only'")
+                self.task_type = tt
+            if "coverage_target" in options:
+                self.coverage_target = float(options["coverage_target"])
+            if "max_exploration_reward" in options:
+                self.max_exploration_reward = float(options["max_exploration_reward"])
+            if "exploration_cell_bonus" in options:
+                self.exploration_cell_bonus = float(options["exploration_cell_bonus"])
+            if "exploration_edge_bonus" in options:
+                self.exploration_edge_bonus = float(options["exploration_edge_bonus"])
+            if "max_steps" in options:
+                self.max_steps = int(options["max_steps"])
 
         # Generate a reproducible episode seed
         episode_seed = int(
             episode_rng.integers(0, 2**31 - 1)
         )
 
+        nvictims = 0 if self.task_type == "exploration_only" else 1
         self.sim = Environment(
             size=4,
             resolution=2,
             seed=episode_seed,
-            victims=1,
+            victims=nvictims,
             ignitions=0,
             params={
                 "initial_blocked_percent": 0.0,
@@ -734,9 +764,11 @@ class RescueEnv(gym.Env):
             geometry_mode=self.geometry_mode,
         )
         self.sim._core.set_people(self.sim.victims, self.sim.agents[:1])
+        self.sim.agents = self.sim.agents[:1]
         self.sim.tick(0)
         self.victim_exit_distance = None
-        self._place_victims(episode_rng)
+        if self.task_type != "exploration_only":
+            self._place_victims(episode_rng)
 
         self.steps = 0
         self.rewarded_pickups = set()
@@ -751,8 +783,6 @@ class RescueEnv(gym.Env):
                 self.reveal_victim = bool(options["reveal_victim"])
             if "observability_stage" in options:
                 self.observability_stage = str(options["observability_stage"])
-            if "task_type" in options:
-                self.task_type = str(options["task_type"]).lower()
             if "discovery_reward" in options:
                 self.discovery_reward = float(options["discovery_reward"])
             if "return_mode" in options:
@@ -769,6 +799,27 @@ class RescueEnv(gym.Env):
             max_height=self.max_height,
             max_width=self.max_width,
         )
+
+        self._compute_reachable_graph()
+        self._observed_reachable_cells = set()
+        self._visited_reachable_cells = set()
+        self._discovered_edges = set()
+        self._visited_rooms = set()
+        self._revisit_count = 0
+        self._oscillation_steps = 0
+        self._current_wait_streak = 0
+        self._max_consecutive_waits = 0
+        self._wait_streaks_gt5 = 0
+        self._wait_streaks_gt10 = 0
+        self._wait_streaks_gt50 = 0
+        self._doorway_crossings = 0
+        self._doorway_reversals = 0
+        self._zone_history = []
+        self._pos_history = []
+        self._coverage_at_steps = {}
+        self._total_exploration_reward = 0.0
+        self._exploration_completed = False
+        self._action_counts = np.zeros(self.action_space.n, dtype=np.int32)
 
         if self.task_type == "return":
             r_level = options.get("return_level") if (options and "return_level" in options) else getattr(self, "return_level", None)
@@ -795,6 +846,14 @@ class RescueEnv(gym.Env):
             )
 
         observation = self._get_observation()
+        self._update_exploration_tracking()
+
+        denom_cells = len(self._reachable_interior_cells) if self._reachable_interior_cells else 1
+        denom_edges = len(self._reachable_traversable_edges) if self._reachable_traversable_edges else 1
+        observed_coverage = len(self._observed_reachable_cells) / denom_cells
+        visited_coverage = len(self._visited_reachable_cells) / denom_cells
+        edge_coverage = len(self._discovered_edges) / denom_edges
+
         info = {
             "seed": episode_seed,
             "scenario_seed": scenario_seed,
@@ -805,11 +864,173 @@ class RescueEnv(gym.Env):
             "task_type": self.task_type,
             "return_mode": self.current_return_mode if self.task_type == "return" else None,
             "return_level": self.current_return_level if self.task_type == "return" else None,
+            "observed_coverage": observed_coverage,
+            "visited_coverage": visited_coverage,
+            "edge_coverage": edge_coverage,
+            "reachable_interior_cells": len(self._reachable_interior_cells),
+            "observed_reachable_cells": len(self._observed_reachable_cells),
+            "visited_reachable_cells": len(self._visited_reachable_cells),
+            "reachable_edges": len(self._reachable_traversable_edges),
+            "discovered_edges": len(self._discovered_edges),
+            "reachable_rooms": len(self._reachable_rooms),
+            "unique_rooms_entered": len(self._visited_rooms),
+            "revisits": self._revisit_count,
+            "doorway_crossings": self._doorway_crossings,
+            "doorway_reversals": self._doorway_reversals,
+            "max_consecutive_waits": self._max_consecutive_waits,
+            "wait_streaks_gt5": self._wait_streaks_gt5,
+            "wait_streaks_gt10": self._wait_streaks_gt10,
+            "wait_streaks_gt50": self._wait_streaks_gt50,
+            "wait_action_fraction": 0.0,
+            "oscillation_percentage": 0.0,
+            "cells_per_100_steps": 0.0,
+            "coverage_at_50": None,
+            "coverage_at_100": None,
+            "coverage_at_200": None,
+            "coverage_at_384": None,
+            "exploration_success": False,
         }
 
         return observation, info
 
-    
+    def _compute_reachable_graph(self):
+        """BFS flood-fill from firefighter entrance across traversable edges.
+
+        Calculates ground-truth reachable interior cells, traversable edges, and rooms
+        for coverage denominators and evaluation metrics. Never exposed to policy.
+        """
+        agent_spawn = (
+            (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
+            if len(self.sim.agents) > 0 else (0, 0)
+        )
+        reachable_cells = set()
+        reachable_interior = set()
+        reachable_edges = set()
+        reachable_rooms = set()
+
+        queue = deque([agent_spawn])
+        seen = {agent_spawn}
+
+        while queue:
+            r, c = queue.popleft()
+            reachable_cells.add((r, c))
+            z = int(self.sim.zone[r, c])
+            reachable_interior.add((r, c))
+            reachable_rooms.add(z)
+
+            # North: (r-1, c) via south[r-1, c]
+            if r > 0 and self.sim.south[r - 1, c] >= 0.5 and self.sim.debris[r - 1, c] == 0:
+                edge = ((min(r - 1, r), c), (max(r - 1, r), c))
+                reachable_edges.add(edge)
+                if (r - 1, c) not in seen:
+                    seen.add((r - 1, c))
+                    queue.append((r - 1, c))
+
+            # South: (r+1, c) via south[r, c]
+            if r < self.sim.h - 1 and self.sim.south[r, c] >= 0.5 and self.sim.debris[r + 1, c] == 0:
+                edge = ((min(r, r + 1), c), (max(r, r + 1), c))
+                reachable_edges.add(edge)
+                if (r + 1, c) not in seen:
+                    seen.add((r + 1, c))
+                    queue.append((r + 1, c))
+
+            # West: (r, c-1) via east[r, c-1]
+            if c > 0 and self.sim.east[r, c - 1] >= 0.5 and self.sim.debris[r, c - 1] == 0:
+                edge = ((r, min(c - 1, c)), (r, max(c - 1, c)))
+                reachable_edges.add(edge)
+                if (r, c - 1) not in seen:
+                    seen.add((r, c - 1))
+                    queue.append((r, c - 1))
+
+            # East: (r, c+1) via east[r, c]
+            if c < self.sim.w - 1 and self.sim.east[r, c] >= 0.5 and self.sim.debris[r, c + 1] == 0:
+                edge = ((r, min(c, c + 1)), (r, max(c, c + 1)))
+                reachable_edges.add(edge)
+                if (r, c + 1) not in seen:
+                    seen.add((r, c + 1))
+                    queue.append((r, c + 1))
+
+        self._reachable_cells = reachable_cells
+        self._reachable_interior_cells = reachable_interior
+        self._unobserved_reachable_interior_cells = set(reachable_interior)
+        self._reachable_traversable_edges = reachable_edges
+        self._reachable_rooms = reachable_rooms
+
+    def _update_exploration_tracking(self):
+        agent_pos = (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
+        ar, ac = agent_pos
+        current_zone = int(self.sim.zone[ar, ac]) if (0 <= ar < self.sim.h and 0 <= ac < self.sim.w) else -1
+
+        # 2-cell oscillation detection
+        self._pos_history.append(agent_pos)
+        if len(self._pos_history) > 4:
+            self._pos_history.pop(0)
+        is_oscillating = (
+            len(self._pos_history) == 4
+            and self._pos_history[3] == self._pos_history[1]
+            and self._pos_history[2] == self._pos_history[0]
+            and self._pos_history[3] != self._pos_history[2]
+        )
+        if is_oscillating:
+            self._oscillation_steps += 1
+
+        # Doorway crossings and reversals
+        if len(self._zone_history) >= 1:
+            prev_zone = self._zone_history[-1]
+            if current_zone != prev_zone and current_zone >= 0 and prev_zone >= 0:
+                self._doorway_crossings += 1
+                if len(self._zone_history) >= 2 and self._zone_history[-2] == current_zone:
+                    self._doorway_reversals += 1
+        self._zone_history.append(current_zone)
+        if len(self._zone_history) > 10:
+            self._zone_history.pop(0)
+
+        # Visited cells and rooms
+        if agent_pos in self._reachable_interior_cells:
+            if agent_pos in self._visited_reachable_cells:
+                self._revisit_count += 1
+            else:
+                self._visited_reachable_cells.add(agent_pos)
+        if current_zone >= 0:
+            self._visited_rooms.add(current_zone)
+
+        # Newly observed reachable interior cells
+        newly_observed_cells = []
+        just_observed = [
+            cell for cell in self._unobserved_reachable_interior_cells
+            if self.memory.explored[cell[0], cell[1]] > 0.0
+        ]
+        for cell in just_observed:
+            self._unobserved_reachable_interior_cells.remove(cell)
+            self._observed_reachable_cells.add(cell)
+            newly_observed_cells.append(cell)
+
+        # Newly discovered reachable edges
+        newly_discovered_edges = []
+        for r, c in newly_observed_cells:
+            if r > 0 and self.sim.south[r - 1, c] >= 0.5:
+                edge = ((min(r - 1, r), c), (max(r - 1, r), c))
+                if edge in self._reachable_traversable_edges and edge not in self._discovered_edges:
+                    self._discovered_edges.add(edge)
+                    newly_discovered_edges.append(edge)
+            if r < self.sim.h - 1 and self.sim.south[r, c] >= 0.5:
+                edge = ((min(r, r + 1), c), (max(r, r + 1), c))
+                if edge in self._reachable_traversable_edges and edge not in self._discovered_edges:
+                    self._discovered_edges.add(edge)
+                    newly_discovered_edges.append(edge)
+            if c > 0 and self.sim.east[r, c - 1] >= 0.5:
+                edge = ((r, min(c - 1, c)), (r, max(c - 1, c)))
+                if edge in self._reachable_traversable_edges and edge not in self._discovered_edges:
+                    self._discovered_edges.add(edge)
+                    newly_discovered_edges.append(edge)
+            if c < self.sim.w - 1 and self.sim.east[r, c] >= 0.5:
+                edge = ((r, min(c, c + 1)), (r, max(c, c + 1)))
+                if edge in self._reachable_traversable_edges and edge not in self._discovered_edges:
+                    self._discovered_edges.add(edge)
+                    newly_discovered_edges.append(edge)
+
+        return newly_observed_cells, newly_discovered_edges, is_oscillating
+
     def step(self, action):
         """Execute one action in the simulation."""
 
@@ -819,16 +1040,32 @@ class RescueEnv(gym.Env):
         if not self.action_space.contains(action):
             raise ValueError(f"Invalid action: {action}")
 
+        # Action tracking and stationary Wait streaks
+        int_action = int(action)
+        self._action_counts[int_action] += 1
+        if int_action == 0:
+            self._current_wait_streak += 1
+            if self._current_wait_streak > self._max_consecutive_waits:
+                self._max_consecutive_waits = self._current_wait_streak
+        else:
+            if self._current_wait_streak >= 50:
+                self._wait_streaks_gt50 += 1
+            elif self._current_wait_streak >= 10:
+                self._wait_streaks_gt10 += 1
+            elif self._current_wait_streak >= 5:
+                self._wait_streaks_gt5 += 1
+            self._current_wait_streak = 0
+
         searching = not self.victim_seen
         explored_before = self.memory.explored.sum()
 
         # Potential before executing the action.
         before = (
             state_potential(self.sim)
-            if self.navigation_shaping else 0.0
+            if (self.navigation_shaping and self.task_type != "exploration_only") else 0.0
         )
 
-        command = self.ACTIONS[int(action)]
+        command = self.ACTIONS[int_action]
 
         result = self.sim.action_batch(
             [command],
@@ -837,52 +1074,105 @@ class RescueEnv(gym.Env):
 
         self.steps += 1
 
-        terminated = bool(result["done"])
+        if self.task_type == "exploration_only":
+            terminated = bool(self._exploration_completed)
+        else:
+            terminated = bool(result["done"])
         truncated = self.steps >= self.max_steps and not terminated
 
         # Base rescue reward.
-        reward = float(result["reward"])
+        reward = float(result["reward"]) if self.task_type != "exploration_only" else 0.0
 
         # Update observation and remembered memory
         observation = self._get_observation()
         newly_uncovered = max(0, int(self.memory.explored.sum() - explored_before))
 
-        # Check auxiliary discovery task termination and reward
-        if self.task_type == "discovery":
+        new_cells, new_edges, is_oscillating = self._update_exploration_tracking()
+
+        denom_cells = len(self._reachable_interior_cells) if self._reachable_interior_cells else 1
+        denom_edges = len(self._reachable_traversable_edges) if self._reachable_traversable_edges else 1
+        observed_coverage = len(self._observed_reachable_cells) / denom_cells
+        visited_coverage = len(self._visited_reachable_cells) / denom_cells
+        edge_coverage = len(self._discovered_edges) / denom_edges
+
+        if self.steps in (50, 100, 200, 384):
+            self._coverage_at_steps[self.steps] = observed_coverage
+
+        # Check exploration task completion and rewards
+        if self.task_type == "exploration_only":
+            if observed_coverage >= self.coverage_target:
+                self._exploration_completed = True
+                terminated = True
+                truncated = False
+
+            if self.reward_shaping:
+                shaping = -self.exploration_step_penalty
+                pos_potential = (
+                    len(new_cells) * self.exploration_cell_bonus
+                    + len(new_edges) * self.exploration_edge_bonus
+                )
+                if pos_potential > 0.0 and self._total_exploration_reward < self.max_exploration_reward:
+                    actual_pos = min(
+                        pos_potential,
+                        self.max_exploration_reward - self._total_exploration_reward,
+                    )
+                    self._total_exploration_reward += actual_pos
+                    shaping += actual_pos
+                if is_oscillating:
+                    shaping -= self.oscillation_penalty
+                reward = float(shaping)
+            else:
+                reward = 0.0
+        elif self.task_type == "discovery":
             victim_sighted = bool((observation["grid"][6] > 0).any())
             if victim_sighted and not self._discovery_completed:
                 self._discovery_completed = True
                 reward += self.discovery_reward
                 terminated = True
 
-        if self.reward_shaping:
-            if self.reward_shaper is None:
-                self.reward_shaper = RewardShaper()
-            reward += self.reward_shaper.compute_reward(
-                result["victims"],
-                newly_uncovered_cells=newly_uncovered,
-                current_position=(self.sim.agents[0]["r"], self.sim.agents[0]["c"]),
-            )
+        if self.task_type != "exploration_only":
+            if self.reward_shaping:
+                if self.reward_shaper is None:
+                    self.reward_shaper = RewardShaper()
+                reward += self.reward_shaper.compute_reward(
+                    result["victims"],
+                    newly_uncovered_cells=newly_uncovered,
+                    current_position=(self.sim.agents[0]["r"], self.sim.agents[0]["c"]),
+                )
 
-        # New optional navigation reward.
-        if self.navigation_shaping:
-            after = (
-                0.0 if terminated
-                else state_potential(self.sim)
-            )
+            # New optional navigation reward.
+            if self.navigation_shaping:
+                after = (
+                    0.0 if terminated
+                    else state_potential(self.sim)
+                )
+                reward += potential_reward(before, after)
 
-            reward += potential_reward(before, after)
+            if self.exploration_bonus and searching:
+                reward += float(self.exploration_bonus * newly_uncovered)
 
-        if self.exploration_bonus and searching:
-            reward += float(self.exploration_bonus * newly_uncovered)
+        if terminated or truncated:
+            if self._current_wait_streak >= 50:
+                self._wait_streaks_gt50 += 1
+            elif self._current_wait_streak >= 10:
+                self._wait_streaks_gt10 += 1
+            elif self._current_wait_streak >= 5:
+                self._wait_streaks_gt5 += 1
 
         rescued = sum(
             int(v["rescued"]) for v in result["victims"]
         )
 
-        task_success = (rescued == len(result["victims"])) or (
-            self.task_type == "discovery" and self._discovery_completed
-        )
+        if self.task_type == "exploration_only":
+            task_success = self._exploration_completed
+        elif self.task_type == "discovery":
+            task_success = self._discovery_completed
+        else:
+            task_success = len(result["victims"]) > 0 and (rescued == len(result["victims"]))
+
+        cells_per_100_steps = (len(self._observed_reachable_cells) / (self.steps / 100.0)) if self.steps > 0 else 0.0
+        wait_action_fraction = (self._action_counts[0] / self.steps) if self.steps > 0 else 0.0
+        oscillation_pct = ((self._oscillation_steps / self.steps) * 100.0) if self.steps > 0 else 0.0
 
         info = {
             "steps": self.steps,
@@ -892,11 +1182,38 @@ class RescueEnv(gym.Env):
             "timeout": truncated,
             "task_type": self.task_type,
             "discovery": self.victim_seen,
+            "observed_coverage": observed_coverage,
+            "visited_coverage": visited_coverage,
+            "edge_coverage": edge_coverage,
+            "reachable_interior_cells": len(self._reachable_interior_cells),
+            "observed_reachable_cells": len(self._observed_reachable_cells),
+            "visited_reachable_cells": len(self._visited_reachable_cells),
+            "reachable_edges": len(self._reachable_traversable_edges),
+            "discovered_edges": len(self._discovered_edges),
+            "reachable_rooms": len(self._reachable_rooms),
+            "unique_rooms_entered": len(self._visited_rooms),
+            "revisits": self._revisit_count,
+            "doorway_crossings": self._doorway_crossings,
+            "doorway_reversals": self._doorway_reversals,
+            "max_consecutive_waits": self._max_consecutive_waits,
+            "wait_streaks_gt5": self._wait_streaks_gt5,
+            "wait_streaks_gt10": self._wait_streaks_gt10,
+            "wait_streaks_gt50": self._wait_streaks_gt50,
+            "wait_action_fraction": wait_action_fraction,
+            "oscillation_percentage": oscillation_pct,
+            "cells_per_100_steps": cells_per_100_steps,
+            "coverage_at_50": self._coverage_at_steps.get(50, observed_coverage if self.steps >= 50 else None),
+            "coverage_at_100": self._coverage_at_steps.get(100, observed_coverage if self.steps >= 100 else None),
+            "coverage_at_200": self._coverage_at_steps.get(200, observed_coverage if self.steps >= 200 else (observed_coverage if terminated else None)),
+            "coverage_at_384": self._coverage_at_steps.get(384, observed_coverage if self.steps >= 384 else (observed_coverage if terminated else None)),
+            "exploration_success": self._exploration_completed,
         }
         if self.task_type == "discovery":
             info["discovery_success"] = self._discovery_completed
         elif self.task_type == "return":
-            info["return_success"] = (rescued == len(result["victims"]))
+            info["return_success"] = len(result["victims"]) > 0 and (rescued == len(result["victims"]))
+        elif self.task_type == "exploration_only":
+            info["exploration_reward"] = self._total_exploration_reward
 
         return observation, reward, terminated, truncated, info
 
