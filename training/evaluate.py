@@ -169,6 +169,12 @@ def main():
         default="exit",
         help="Victim distance metric: 'exit' (legacy, min distance to any exit) or 'spawn' (true distance to firefighter spawn)",
     )
+    parser.add_argument(
+        "--geometry-mode",
+        choices=["edge", "legacy_cell"],
+        default="edge",
+        help="Geometry mode: 'edge' (native edge-conductance walls) or 'legacy_cell' (398 full-cell wall blocks)",
+    )
 
     args = parser.parse_args()
 
@@ -196,6 +202,7 @@ def main():
         navigation_shaping=False,
         memory_agent_marker=args.memory_agent_marker,
         distance_metric=args.distance_metric,
+        geometry_mode=args.geometry_mode,
     )
     env = PreviousActionWrapper(raw_env)
 

@@ -518,6 +518,7 @@ def make_single_train_env(
     discovery_reward: float = 2.0,
     return_mode: str = "legacy",
     seed: int | None = None,
+    geometry_mode: str = "edge",
 ):
     """Factory creating an individual monitored environment."""
     def _init():
@@ -533,6 +534,7 @@ def make_single_train_env(
             task_mixture=task_mixture,
             discovery_reward=discovery_reward,
             return_mode=return_mode,
+            geometry_mode=geometry_mode,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -556,6 +558,7 @@ def make_train_env(
     return_mode: str = "legacy",
     n_envs: int = 8,
     base_seed: int = 42,
+    geometry_mode: str = "edge",
 ) -> DummyVecEnv | Monitor:
     """Create vectorized or single monitored training environment."""
     if normalize_stage(stage) == "2C" and substage == "2A":
@@ -574,6 +577,7 @@ def make_train_env(
             task_mixture=task_mixture,
             discovery_reward=discovery_reward,
             return_mode=return_mode,
+            geometry_mode=geometry_mode,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -592,6 +596,7 @@ def make_train_env(
             discovery_reward=discovery_reward,
             return_mode=return_mode,
             seed=base_seed + i * 1000,
+            geometry_mode=geometry_mode,
         )
         for i in range(n_envs)
     ]
@@ -603,6 +608,7 @@ def make_eval_env(
     max_steps: int = 64,
     min_victim_distance: int = 1,
     distance_metric: str = "exit",
+    geometry_mode: str = "edge",
 ) -> PreviousActionWrapper:
     """Unshaped evaluation environment (+10 native rescue only)."""
     env = RescueEnv(
@@ -612,6 +618,7 @@ def make_eval_env(
         reward_shaping=False,
         navigation_shaping=False,
         distance_metric=distance_metric,
+        geometry_mode=geometry_mode,
     )
     return PreviousActionWrapper(env)
 
@@ -1443,6 +1450,12 @@ def parse_args():
         default=None,
         help="Custom TensorBoard log folder name under logs/ (default: name of save-dir)",
     )
+    parser.add_argument(
+        "--geometry-mode",
+        choices=["edge", "legacy_cell"],
+        default="edge",
+        help="Geometry mode: 'edge' (native edge-conductance walls) or 'legacy_cell' (398 full-cell wall blocks)",
+    )
     return parser.parse_args()
 
 
@@ -1504,6 +1517,7 @@ def main():
         "task_mixture": task_mixture,
         "discovery_reward": args.discovery_reward,
         "return_mode": args.return_mode,
+        "geometry_mode": args.geometry_mode,
     }
 
     # Determine timesteps for stages
@@ -1549,8 +1563,9 @@ def main():
         return_mode=args.return_mode,
         n_envs=args.n_envs,
         base_seed=args.seed,
+        geometry_mode=args.geometry_mode,
     )
-    eval_env = make_eval_env(victim_distance=2, max_steps=64)
+    eval_env = make_eval_env(victim_distance=2, max_steps=64, geometry_mode=args.geometry_mode)
 
     if args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")

@@ -120,7 +120,7 @@ class RescueEnv(gym.Env):
                  geometry_reveal_fraction=0.0, reveal_victim=False,
                  observability_stage="A", task_type="full", discovery_reward=2.0,
                  return_mode="legacy", return_level=None, distance_metric="exit",
-                 prevent_exterior_wandering=True):
+                 prevent_exterior_wandering=True, geometry_mode="edge"):
         super().__init__()
 
         self.max_steps = max_steps
@@ -142,6 +142,9 @@ class RescueEnv(gym.Env):
             raise ValueError(f"Unknown distance_metric: '{distance_metric}'. Valid: 'exit', 'spawn'")
         self.distance_metric = str(distance_metric).lower()
         self.prevent_exterior_wandering = bool(prevent_exterior_wandering)
+        if str(geometry_mode).lower() not in ("edge", "legacy_cell"):
+            raise ValueError(f"Unknown geometry_mode: '{geometry_mode}'. Valid: 'edge', 'legacy_cell'")
+        self.geometry_mode = str(geometry_mode).lower()
 
         self.geometry_reveal_fraction = float(geometry_reveal_fraction)
         self.reveal_victim = bool(reveal_victim)
@@ -597,7 +600,7 @@ class RescueEnv(gym.Env):
                         or nr >= self.sim.h
                         or nc < 0
                         or nc >= self.sim.w
-                        or self.sim.zone[nr, nc] < 0
+                        or (self.geometry_mode == "legacy_cell" and self.sim.zone[nr, nc] < 0)
                     )
                     if is_exterior:
                         mask[action_idx] = False
@@ -698,6 +701,11 @@ class RescueEnv(gym.Env):
                 self.distance_metric = dm
             if "prevent_exterior_wandering" in options:
                 self.prevent_exterior_wandering = bool(options["prevent_exterior_wandering"])
+            if "geometry_mode" in options:
+                gm = str(options["geometry_mode"]).lower()
+                if gm not in ("edge", "legacy_cell"):
+                    raise ValueError(f"Unknown geometry_mode: '{gm}'. Valid: 'edge', 'legacy_cell'")
+                self.geometry_mode = gm
 
         # Generate a reproducible episode seed
         episode_seed = int(
@@ -714,6 +722,7 @@ class RescueEnv(gym.Env):
                 "initial_blocked_percent": 0.0,
                 "opening_open_percent": 100.0,
             },
+            geometry_mode=self.geometry_mode,
         )
         self.sim._core.set_people(self.sim.victims, self.sim.agents[:1])
         self.sim.tick(0)

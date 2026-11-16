@@ -144,6 +144,7 @@ class EpisodeRecorder:
             "min_victim_distance": getattr(env, "min_victim_distance", 1),
             "task_type": getattr(env, "task_type", "full"),
             "options": options or {},
+            "geometry_mode": getattr(env, "geometry_mode", "edge"),
             "version": "2.0.0",
         }
 
@@ -207,6 +208,7 @@ class EpisodeRecorder:
                 "east": (sim.east >= 0.5).astype(int).tolist() if hasattr(sim, "east") else [],
                 "openings": openings,
                 "exits": exits,
+                "geometry_mode": getattr(env, "geometry_mode", "edge"),
                 "max_height": int(getattr(env, "MEMORY_HEIGHT", 40)),
                 "max_width": int(getattr(env, "MEMORY_WIDTH", 52)),
                 "pad_top": int((getattr(env, "MEMORY_HEIGHT", 40) - sim.h) // 2),

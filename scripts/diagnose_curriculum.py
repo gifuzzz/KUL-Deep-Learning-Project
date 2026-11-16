@@ -79,6 +79,7 @@ def evaluate_tier(
     reveal_victim: bool = False,
     observability_stage: str = "A",
     distance_metric: str = "exit",
+    geometry_mode: str = "edge",
 ) -> dict[str, float]:
     env = RescueEnv(
         victim_distance=victim_distance,
@@ -90,6 +91,7 @@ def evaluate_tier(
         reveal_victim=reveal_victim,
         observability_stage=observability_stage,
         distance_metric=distance_metric,
+        geometry_mode=geometry_mode,
     )
     env = PreviousActionWrapper(env)
 
@@ -182,22 +184,41 @@ def evaluate_tier(
 
 
 def _eval_worker(task):
-    (
-        model_path,
-        tier_name,
-        dist,
-        min_dist,
-        max_s,
-        n_episodes,
-        seed_start,
-        deterministic,
-        device,
-        geom_frac,
-        rev_vict,
-        obs_stg,
-        dist_metric,
-    ) = task
-    dummy_env = make_eval_env(victim_distance=2, max_steps=64)
+    if len(task) == 14:
+        (
+            model_path,
+            tier_name,
+            dist,
+            min_dist,
+            max_s,
+            n_episodes,
+            seed_start,
+            deterministic,
+            device,
+            geom_frac,
+            rev_vict,
+            obs_stg,
+            dist_metric,
+            geom_mode,
+        ) = task
+    else:
+        (
+            model_path,
+            tier_name,
+            dist,
+            min_dist,
+            max_s,
+            n_episodes,
+            seed_start,
+            deterministic,
+            device,
+            geom_frac,
+            rev_vict,
+            obs_stg,
+            dist_metric,
+        ) = task
+        geom_mode = "edge"
+    dummy_env = make_eval_env(victim_distance=2, max_steps=64, geometry_mode=geom_mode)
     model = load_checkpoint(model_path, env=dummy_env, device=device)
     dummy_env.close()
     res = evaluate_tier(
@@ -213,6 +234,7 @@ def _eval_worker(task):
         reveal_victim=rev_vict,
         observability_stage=obs_stg,
         distance_metric=dist_metric,
+        geometry_mode=geom_mode,
     )
     mode_str = "deterministic" if deterministic else "stochastic"
     print(
@@ -236,6 +258,7 @@ def run_full_diagnosis(
     reveal_victim: bool = False,
     observability_stage: str = "A",
     distance_metric: str = "exit",
+    geometry_mode: str = "edge",
 ) -> dict:
     if tiers is None:
         if preset == "legacy":
@@ -248,8 +271,8 @@ def run_full_diagnosis(
     if workers > 1:
         tasks = []
         for tier_name, dist, min_dist, max_s in tiers:
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric))
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric, geometry_mode))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric, geometry_mode))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             worker_results = list(executor.map(_eval_worker, tasks))
         results = {tier[0]: {} for tier in tiers}
@@ -257,7 +280,7 @@ def run_full_diagnosis(
             results[tier_name][mode_str] = res
         return results
 
-    dummy_env = make_eval_env(victim_distance=2, max_steps=64)
+    dummy_env = make_eval_env(victim_distance=2, max_steps=64, geometry_mode=geometry_mode)
     model = load_checkpoint(model_path, env=dummy_env, device=device)
     dummy_env.close()
 
@@ -276,6 +299,7 @@ def run_full_diagnosis(
             reveal_victim=reveal_victim,
             observability_stage=observability_stage,
             distance_metric=distance_metric,
+            geometry_mode=geometry_mode,
         )
         print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%", flush=True)
         stoch = evaluate_tier(
@@ -291,6 +315,7 @@ def run_full_diagnosis(
             reveal_victim=reveal_victim,
             observability_stage=observability_stage,
             distance_metric=distance_metric,
+            geometry_mode=geometry_mode,
         )
         print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%", flush=True)
         results[tier_name] = {
@@ -367,6 +392,12 @@ if __name__ == "__main__":
         default="exit",
         help="Victim distance metric: 'exit' (legacy, min distance to any exit) or 'spawn' (true distance to firefighter spawn)",
     )
+    parser.add_argument(
+        "--geometry-mode",
+        choices=["edge", "legacy_cell"],
+        default="edge",
+        help="Geometry mode: 'edge' (native edge-conductance walls) or 'legacy_cell' (398 full-cell wall blocks)",
+    )
     args = parser.parse_args()
 
     if args.observability_stage:
@@ -401,8 +432,9 @@ if __name__ == "__main__":
         reveal_victim=args.reveal_victim,
         observability_stage=args.observability_stage or "A",
         distance_metric=args.distance_metric,
+        geometry_mode=args.geometry_mode,
     )
-    print_table(res, f"{args.model} (metric={args.distance_metric})")
+    print_table(res, f"{args.model} (metric={args.distance_metric}, geom={args.geometry_mode})")
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w") as f:

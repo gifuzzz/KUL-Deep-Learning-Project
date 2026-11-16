@@ -495,6 +495,7 @@ function renderWorldView() {
   const offsetY = (canvasH - H * cellSize) / 2;
 
   // 1. Draw zones / rooms
+  const isEdgeMode = (staticGT.geometry_mode === "edge");
   const zones = staticGT.zones || [];
   for (let r = 0; r < H; r++) {
     for (let c = 0; c < W; c++) {
@@ -504,6 +505,9 @@ function renderWorldView() {
         // Distinct room tint
         const hue = (z * 65 + 180) % 360;
         fill = `hsl(${hue}, 28%, 14%)`;
+      } else if (!isEdgeMode) {
+        // Legacy cell wall block
+        fill = "#1e293b";
       }
       worldCtx.fillStyle = fill;
       worldCtx.fillRect(offsetX + c * cellSize, offsetY + r * cellSize, cellSize, cellSize);
@@ -530,7 +534,7 @@ function renderWorldView() {
       // South edge
       if (r < H - 1) {
         const isSouthPassable = south[r] && south[r][c] === 1;
-        if (!isSouthPassable && zCur >= 0) {
+        if (!isSouthPassable && (zCur >= 0 || isEdgeMode)) {
           worldCtx.beginPath();
           worldCtx.moveTo(x, y + cellSize);
           worldCtx.lineTo(x + cellSize, y + cellSize);
@@ -540,13 +544,50 @@ function renderWorldView() {
       // East edge
       if (c < W - 1) {
         const isEastPassable = east[r] && east[r][c] === 1;
-        if (!isEastPassable && zCur >= 0) {
+        if (!isEastPassable && (zCur >= 0 || isEdgeMode)) {
           worldCtx.beginPath();
           worldCtx.moveTo(x + cellSize, y);
           worldCtx.lineTo(x + cellSize, y + cellSize);
           worldCtx.stroke();
         }
       }
+    }
+  }
+
+  // Perimeter walls (along outer building boundaries, leaving openings at exits)
+  const exitSet = new Set((staticGT.exits || []).map(([er, ec]) => `${er},${ec}`));
+  for (let c = 0; c < W; c++) {
+    const x = offsetX + c * cellSize;
+    // Top perimeter (r = 0, North boundary)
+    if (!exitSet.has(`0,${c}`)) {
+      worldCtx.beginPath();
+      worldCtx.moveTo(x, offsetY);
+      worldCtx.lineTo(x + cellSize, offsetY);
+      worldCtx.stroke();
+    }
+    // Bottom perimeter (r = H - 1, South boundary)
+    if (!exitSet.has(`${H - 1},${c}`)) {
+      worldCtx.beginPath();
+      worldCtx.moveTo(x, offsetY + H * cellSize);
+      worldCtx.lineTo(x + cellSize, offsetY + H * cellSize);
+      worldCtx.stroke();
+    }
+  }
+  for (let r = 0; r < H; r++) {
+    const y = offsetY + r * cellSize;
+    // Left perimeter (c = 0, West boundary)
+    if (!exitSet.has(`${r},0`)) {
+      worldCtx.beginPath();
+      worldCtx.moveTo(offsetX, y);
+      worldCtx.lineTo(offsetX, y + cellSize);
+      worldCtx.stroke();
+    }
+    // Right perimeter (c = W - 1, East boundary)
+    if (!exitSet.has(`${r},${W - 1}`)) {
+      worldCtx.beginPath();
+      worldCtx.moveTo(offsetX + W * cellSize, y);
+      worldCtx.lineTo(offsetX + W * cellSize, y + cellSize);
+      worldCtx.stroke();
     }
   }
 

@@ -195,9 +195,12 @@ DESCRIPTIONS={'smoke_turbulence':'Conservative temporal smoke fluctuations; lowe
 }
 
 class GeometryEnvironment:
- def __init__(self, size=8,resolution=2,seed=12,victims=7,ignitions=2,agents=4,params=None):
+ def __init__(self, size=8,resolution=2,seed=12,victims=7,ignitions=2,agents=4,params=None,geometry_mode="edge"):
   if not 4<=int(size)<=64 or not 2<=int(resolution)<=8:raise ValueError('size 4..64; resolution 2..8')
   if int(agents)<0:raise ValueError('agents must be non-negative')
+  if str(geometry_mode).lower() not in ("edge", "legacy_cell"):
+   raise ValueError(f"Unknown geometry_mode: {geometry_mode}. Valid: 'edge', 'legacy_cell'")
+  self.geometry_mode=str(geometry_mode).lower()
   self.size=int(size);self.resolution=int(resolution);self.seed=int(seed)
   self.nvictims=int(victims);self.nignitions=int(ignitions);self.nagents=int(agents)
   self.params=dict(DEFAULTS)
@@ -396,28 +399,31 @@ class GeometryEnvironment:
    begin=int(rng.choice(legal))
    opening('window',orient,at,begin*q,width*q,z,opened=bool(rng.random()*100<self.params['opening_open_percent']))
   for op in self.openings:op['blocked']=False
-  # Walls occupy cells rather than being represented only by blocked faces.
-  # Opening spans remain floor cells so an open door or window connects spaces.
-  self.wall=np.zeros((H,W),dtype=bool)
-  def opening_face(orient,at,position):
-   return any(op['orient']==orient and op['at']==at and
-              op['start']<=position<op['start']+op['length']
-              and op['kind'] in ('door','window','exit') for op in self.openings)
-  for r in range(H):
-   for c in range(W-1):
-    if self.zone[r,c]>=0 and self.zone[r,c+1]>=0 and self.zone[r,c]!=self.zone[r,c+1]:
-     if not opening_face('V',c+1,r):self.wall[r,c]=True
-  for r in range(H-1):
+  if self.geometry_mode == "legacy_cell":
+   # Walls occupy cells rather than being represented only by blocked faces.
+   # Opening spans remain floor cells so an open door or window connects spaces.
+   self.wall=np.zeros((H,W),dtype=bool)
+   def opening_face(orient,at,position):
+    return any(op['orient']==orient and op['at']==at and
+               op['start']<=position<op['start']+op['length']
+               and op['kind'] in ('door','window','exit') for op in self.openings)
+   for r in range(H):
+    for c in range(W-1):
+     if self.zone[r,c]>=0 and self.zone[r,c+1]>=0 and self.zone[r,c]!=self.zone[r,c+1]:
+      if not opening_face('V',c+1,r):self.wall[r,c]=True
+   for r in range(H-1):
+    for c in range(W):
+     if self.zone[r,c]>=0 and self.zone[r+1,c]>=0 and self.zone[r,c]!=self.zone[r+1,c]:
+      if not opening_face('H',r+1,c):self.wall[r,c]=True
+   for r in range(H):
+    if not opening_face('V',0,r):self.wall[r,0]=True
+    if not opening_face('V',W,r):self.wall[r,W-1]=True
    for c in range(W):
-    if self.zone[r,c]>=0 and self.zone[r+1,c]>=0 and self.zone[r,c]!=self.zone[r+1,c]:
-     if not opening_face('H',r+1,c):self.wall[r,c]=True
-  for r in range(H):
-   if not opening_face('V',0,r):self.wall[r,0]=True
-   if not opening_face('V',W,r):self.wall[r,W-1]=True
-  for c in range(W):
-   if not opening_face('H',0,c):self.wall[0,c]=True
-   if not opening_face('H',H,c):self.wall[H-1,c]=True
-  self.zone[self.wall]=-1
+    if not opening_face('H',0,c):self.wall[0,c]=True
+    if not opening_face('H',H,c):self.wall[H-1,c]=True
+   self.zone[self.wall]=-1
+  else:
+   self.wall=None
   self.east=np.zeros((H,W-1),dtype=np.float32)
   self.south=np.zeros((H-1,W),dtype=np.float32)
   first=self.corridors[0]
@@ -425,7 +431,8 @@ class GeometryEnvironment:
   self._opening_proximity=self._compute_opening_proximity()
   self._apply_openings()
   self.oxygen=np.full((H,W),self.params['initial_oxygen'],dtype=np.float32)
-  self.oxygen[self.wall]=0
+  if self.geometry_mode == "legacy_cell" and self.wall is not None:
+   self.oxygen[self.wall]=0
   self.smoke=np.zeros((H,W),dtype=np.float32)
   # Smooth noise is sampled on a coarse physical lattice, then bilinearly
   # interpolated onto the simulation grid. It does not vary in scale with q.
@@ -442,7 +449,8 @@ class GeometryEnvironment:
   wood_ids=set(int(z) for z in mat_rng.choice([rm['id'] for rm in self.rooms],size=wood_count,replace=False))
   for z in wood_ids:self.material[self.zone==z]=1
   self.fuel=np.where(self.material==1,1.,.85).astype(np.float32)
-  self.fuel[self.wall]=0
+  if self.geometry_mode == "legacy_cell" and self.wall is not None:
+   self.fuel[self.wall]=0
   self.smoke_flammability=np.zeros((H,W),np.float32)
   self.smoke_flammable_mass=np.zeros((H,W),np.float32)
   self.water_level=np.zeros((H,W),np.float32)
@@ -592,10 +600,14 @@ class GeometryEnvironment:
   if not self._refresh_opening_blocks() and changed:self.rebuild_draft()
   self._purge_debris_fields()
  def _apply_openings(self):
-  self.east[:]=((self.zone[:,:-1]==self.zone[:,1:]) &
-                (self.zone[:,:-1]>=0))
-  self.south[:]=((self.zone[:-1,:]==self.zone[1:,:]) &
-                 (self.zone[:-1,:]>=0))
+  if getattr(self, "geometry_mode", "edge") == "legacy_cell":
+   self.east[:]=((self.zone[:,:-1]==self.zone[:,1:]) &
+                 (self.zone[:,:-1]>=0))
+   self.south[:]=((self.zone[:-1,:]==self.zone[1:,:]) &
+                  (self.zone[:-1,:]>=0))
+  else:
+   self.east[:]=(self.zone[:,:-1]==self.zone[:,1:])
+   self.south[:]=(self.zone[:-1,:]==self.zone[1:,:])
   for op in self.openings:
    if op['kind']=='exit':continue
    permeability=(1. if op['open'] and not op.get('blocked',False) else .012) if op['kind']=='door' else 0.
