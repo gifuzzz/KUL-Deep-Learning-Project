@@ -2,82 +2,278 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Rescue environment · Inspector</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlameBox · Visual Agent Debugger</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
 <header class="header">
-  <div class="identity"><span class="identity-mark" aria-hidden="true">✳</span><div><h1>Rescue environment</h1><p>Observation & action inspector</p></div></div>
-  <div class="session"><span id="status-dot" class="status-dot"></span><span id="episode-status">Connecting</span><span class="divider"></span><span id="step-count">Step 0</span></div>
+  <div class="identity">
+    <span class="identity-mark">🔥</span>
+    <div>
+      <h1>FlameBox Visual Agent Debugger</h1>
+      <p>Observation & action inspector · Synchronized Ground Truth vs. Exact Policy Observations & Neural Decisions</p>
+    </div>
+  </div>
+  <div class="session-info">
+    <span id="status-badge" class="badge ready">Ready</span>
+    <span id="episode-tag" class="badge category">—</span>
+    <span id="step-badge" class="badge step">Step 0 / 0</span>
+  </div>
 </header>
-<main>
-  <section class="toolbar" aria-label="Episode controls">
-    <label>Scenario seed<input id="seed" type="number" min="0" max="2147483647" value="42"></label>
-    <button id="reset">Reset episode</button>
-    <label class="model-select">Checkpoint<select id="checkpoint"><option value="">Manual exploration</option></select></label>
-    <button id="load">Load / reload</button>
-    <label>Policy<select id="mode"><option value="greedy">Highest probability</option><option value="sampled">Sampled</option></select></label>
-    <button id="step" class="primary">Step policy <kbd>Space</kbd></button>
-    <button id="play" class="play">▶ Play</button>
-    <label class="speed-label">Speed<select id="speed"><option value="1">1 step/s</option><option value="4" selected>4 steps/s</option><option value="10">10 steps/s</option></select></label>
+
+<main class="app-container">
+  <!-- Top Control Bar -->
+  <section class="toolbar">
+    <!-- Trajectory Browser -->
+    <div class="toolbar-group">
+      <span class="group-label">Recorded Trajectories</span>
+      <select id="category-filter" aria-label="Filter by category">
+        <option value="all">All Categories</option>
+        <option value="successful_distant_rescue">Distant Rescue</option>
+        <option value="successful_long_distance_rescue">Bridge Rescue</option>
+        <option value="successful_medium_rescue">Medium Rescue</option>
+        <option value="successful_near_rescue">Near Rescue</option>
+        <option value="doorway_oscillation">Doorway Oscillation</option>
+        <option value="carrier_timeout">Carrier Timeout</option>
+        <option value="exploration_timeout">Exploration Timeout</option>
+        <option value="discovered_not_picked">Discovered Not Picked</option>
+        <option value="cell_revisits">Cell Revisits</option>
+      </select>
+      <select id="trajectory-select" aria-label="Select trajectory file">
+        <option value="">(Loading trajectories...)</option>
+      </select>
+      <button id="btn-load-traj" class="btn secondary">Load</button>
+    </div>
+
+    <!-- Live Simulation Generator -->
+    <div class="toolbar-group">
+      <span class="group-label">Live Simulation</span>
+      <select id="checkpoint-select" aria-label="Select model checkpoint">
+        <option value="">(Loading models...)</option>
+      </select>
+      <select id="tier-select" aria-label="Select difficulty tier">
+        <option value="Near">Near (d=2)</option>
+        <option value="Medium">Medium (d=6)</option>
+        <option value="Bridge A">Bridge A (d=8)</option>
+        <option value="Bridge B">Bridge B (d=10)</option>
+        <option value="Bridge C">Bridge C (d=12)</option>
+        <option value="Distant" selected>Distant (d=None)</option>
+      </select>
+      <label class="seed-input">Seed: <input id="seed-input" type="number" min="0" max="2147483647" value="50047"></label>
+      <select id="policy-mode" aria-label="Action selection mode">
+        <option value="deterministic">Deterministic</option>
+        <option value="stochastic">Stochastic</option>
+      </select>
+      <button id="btn-run-live" class="btn primary">Run & Inspect</button>
+    </div>
   </section>
-  <div id="error" class="error" role="alert" hidden></div>
-  <div class="model-note"><span id="model-note">Load a checkpoint to inspect policy probabilities, features, and value estimates.</span><label><input id="shaping" type="checkbox" checked> Training rewards <span class="hint">applied on reset</span></label></div>
 
-  <div class="overview">
-    <section class="panel world-panel">
-      <div class="panel-heading"><div><h2>Simulation</h2><p>Global state · includes cells hidden from the agent</p></div><select id="world-view" aria-label="Simulation viewport"><option value="follow">Follow firefighter</option><option value="building">Whole building</option></select></div>
-      <canvas id="world" width="650" height="400" aria-label="Simulation with physical walls, exit openings, firefighter and victim"></canvas>
-      <div class="world-footer"><div class="legend"><span><i class="key firefighter"></i>Firefighter</span><span><i class="key victim"></i>Victim</span><span><i class="key exit"></i>Exit</span></div><span id="world-position">—</span></div>
-    </section>
-    <section class="panel local-panel">
-      <div class="panel-heading"><div><h2 id="layer-title">Victims</h2><p id="layer-description">The local grid received by the agent</p></div><span id="shape" class="shape">11 × 15 × 15</span></div>
-      <div class="local-controls"><select id="source" aria-label="Observation source"><option value="policy">Policy inputs</option><option value="native">All simulator channels</option></select><select id="phase" aria-label="Before or after action"><option value="after">After action</option><option value="before">Before action</option></select></div>
-      <div class="local-canvas-wrap"><canvas id="local" width="360" height="360" tabindex="0" aria-label="Selected observation channel; click a cell for exact values"></canvas></div>
-      <div class="local-footer"><span id="layer-range">Range 0–1</span><label><input id="cell-values" type="checkbox"> Values</label></div>
-      <p class="canvas-hint">Crosshair = firefighter. Checkerboard = unseen; raw values remain zero.</p>
-    </section>
-    <section class="panel decision-panel">
-      <div class="panel-heading"><div><h2 id="decision-title">Next decision</h2><p>Solid = masked probability · line = unmasked</p></div></div>
-      <div id="action-bars" class="action-bars"></div>
-      <div class="value-line"><span>Critic V(s)<small id="value-note">Expected discounted training reward</small></span><strong id="value">—</strong></div>
-      <div class="manual-heading"><h3>Try an action</h3><label><input id="allow-invalid" type="checkbox"> Test masked actions</label></div>
-      <div id="manual-actions" class="manual-actions"></div>
-      <p class="canvas-hint">Arrow keys move · P picks up/drops · R rescues · W waits</p>
-    </section>
-  </div>
+  <!-- Error / Alert Banner -->
+  <div id="error-banner" class="alert error" hidden></div>
 
-  <section class="panel layers-panel">
-    <div class="panel-heading"><div><h2>Observation layers</h2><p id="layers-caption">Select a channel to inspect its values. These are actual simulator tensors.</p></div><span id="phase-note" class="subtle">After action</span></div>
-    <div id="layers" class="layers"></div>
+  <!-- Synchronized Playback & Timeline Scrubber Bar -->
+  <section class="playback-bar">
+    <div class="playback-controls">
+      <button id="btn-first" class="btn icon-btn" title="First step (Home)">⏮</button>
+      <button id="btn-prev" class="btn icon-btn" title="Step backward (Left Arrow)">◀</button>
+      <button id="btn-play" class="btn play-btn" title="Play / Pause (Space)">▶ Play</button>
+      <button id="btn-next" class="btn icon-btn" title="Step forward (Right Arrow)">▶</button>
+      <button id="btn-last" class="btn icon-btn" title="Last step (End)">⏭</button>
+      <div class="speed-select-wrap">
+        <span>Speed:</span>
+        <select id="playback-speed">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="5">5x</option>
+          <option value="10">10x</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="scrubber-container">
+      <div class="scrubber-header">
+        <span id="scrubber-step-info">Step 0 of 0</span>
+        <span id="scrubber-event-hint" class="event-hint">Click marker pills to jump to key events</span>
+      </div>
+      <div class="slider-wrapper">
+        <input id="timeline-slider" type="range" min="0" max="0" value="0">
+        <div id="timeline-markers" class="timeline-markers"></div>
+      </div>
+    </div>
   </section>
 
-  <div class="details-grid">
-    <section class="panel cell-panel">
-      <div class="panel-heading"><div><h2>Cell inspector</h2><p id="cell-position">Select a cell in the local grid</p></div></div>
-      <div class="table-scroll"><table><thead><tr><th>Channel</th><th>Before</th><th>After</th><th>Δ</th></tr></thead><tbody id="cell-values-table"></tbody></table></div>
-      <p class="footnote">Compared at the same local index. Moving shifts the grid, so a difference can refer to a different world cell.</p>
-    </section>
-    <section class="panel features-panel">
-      <div class="panel-heading"><div><h2>Firefighter inputs</h2><p>The numerical features concatenated with CNN features</p></div></div>
-      <table><thead><tr><th>Feature</th><th>Before</th><th>After</th></tr></thead><tbody id="features"></tbody></table>
-      <details id="feature-details"><summary>Combined feature vector <span id="feature-count">128 features</span></summary><div id="feature-vector" class="feature-vector"></div><p class="footnote">Feature extractor output, combining the grid and firefighter inputs before the actor and critic. Color shows sign and magnitude; hover for an exact value.</p></details>
-    </section>
-    <section class="panel result-panel">
-      <div class="panel-heading"><div><h2>Action result</h2><p id="result-caption">Take an action to inspect the transition</p></div></div>
-      <div id="result" class="result-content"><p class="empty">Every action records its input, chosen command, native simulator result, and Gymnasium output.</p></div>
-    </section>
-  </div>
+  <!-- Main 3-Panel Synchronized Viewport -->
+  <section class="panels-grid">
+    <!-- PANEL 1: Ground Truth Omniscient View -->
+    <div class="panel panel-world">
+      <div class="panel-header">
+        <div>
+          <h2>Panel 1 · Ground Truth View</h2>
+          <span class="sub-label privileged">Privileged · Real Simulation State</span>
+        </div>
+        <div class="panel-header-actions">
+          <label><input id="chk-visited-trail" type="checkbox" checked> Trail</label>
+        </div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="world-canvas" width="480" height="420"></canvas>
+      </div>
+      <div class="panel-footer">
+        <div class="legend-items">
+          <span><i class="legend-dot agent"></i>Agent</span>
+          <span><i class="legend-dot victim"></i>Victim</span>
+          <span><i class="legend-dot exit"></i>Exit</span>
+          <span><i class="legend-dot debris"></i>Debris</span>
+          <span><i class="legend-dot wall"></i>Wall</span>
+        </div>
+        <div id="world-hover-info" class="hover-info">Hover cell for coordinates</div>
+      </div>
+    </div>
 
-  <section class="panel history-panel">
-    <div class="panel-heading"><div><h2>Episode history</h2><p>Review any recorded step without advancing the simulation</p></div><div class="history-buttons"><button id="live">Return to latest</button><button id="export">Export JSON</button></div></div>
-    <div class="timeline"><button id="back" aria-label="Previous recorded step">←</button><input id="seek" type="range" min="0" max="0" value="0" aria-label="Recorded step"><button id="forward" aria-label="Next recorded step">→</button><output id="seek-label">Step 0</output></div>
-    <div class="table-scroll history-scroll"><table><thead><tr><th>Step</th><th>Action</th><th>Selection</th><th>Native result</th><th>Reward</th><th>Total</th><th>Episode</th></tr></thead><tbody id="history"></tbody></table></div>
+    <!-- PANEL 2: Agent Actual Observation -->
+    <div class="panel panel-agent-view">
+      <div class="panel-header">
+        <div>
+          <h2>Panel 2 · Agent Actual View</h2>
+          <span class="sub-label agent-tensor">Exact Policy Input Tensors</span>
+        </div>
+        <div class="view-toggles">
+          <button id="btn-toggle-local" class="btn toggle-btn active">Local (15×15)</button>
+          <button id="btn-toggle-memory" class="btn toggle-btn">Memory (40×52)</button>
+        </div>
+      </div>
+
+      <div class="channel-bar">
+        <label>Channel:
+          <select id="channel-select">
+            <option value="composite">Combined Semantic View</option>
+            <option value="0">Ch 0: Passability North</option>
+            <option value="1">Ch 1: Passability East</option>
+            <option value="2">Ch 2: Passability South</option>
+            <option value="3">Ch 3: Passability West</option>
+            <option value="4">Ch 4: Debris / Obstacle</option>
+            <option value="5">Ch 5: Explored / Visited</option>
+            <option value="6">Ch 6: Known Victim</option>
+            <option value="7">Ch 7: Known Exit</option>
+            <option value="8">Ch 8: Agent Position</option>
+          </select>
+        </label>
+        <span id="channel-dims-badge" class="badge tensor-dims">9 × 15 × 15</span>
+      </div>
+
+      <div class="canvas-wrap">
+        <canvas id="agent-canvas" width="420" height="420"></canvas>
+      </div>
+
+      <div class="panel-footer">
+        <div id="agent-hover-info" class="hover-info">Hover cell for exact tensor value</div>
+      </div>
+
+      <!-- Agent Scalars & Auxiliary Inputs -->
+      <div class="agent-inputs-container">
+        <div class="scalars-grid">
+          <div class="scalar-card"><span class="scalar-name">Row/H</span><strong id="scalar-row">0.00</strong></div>
+          <div class="scalar-card"><span class="scalar-name">Col/W</span><strong id="scalar-col">0.00</strong></div>
+          <div class="scalar-card"><span class="scalar-name">Health</span><strong id="scalar-health">1.00</strong></div>
+          <div class="scalar-card"><span class="scalar-name">Role/3</span><strong id="scalar-role">0.33</strong></div>
+          <div class="scalar-card highlight"><span class="scalar-name">Carrying</span><strong id="scalar-carrying">No</strong></div>
+        </div>
+        <div class="previous-action-card">
+          <span>Previous Action:</span>
+          <strong id="prev-action-name">—</strong>
+        </div>
+        <div class="action-mask-bar">
+          <span class="mask-label">Action Mask:</span>
+          <div id="action-masks-list" class="masks-pills"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PANEL 3: Neural Decisions & Diagnostics -->
+    <div class="panel panel-decisions">
+      <div class="panel-header">
+        <div>
+          <h2>Panel 3 · Neural Decisions</h2>
+          <span class="sub-label neural-diag">Actor Logits, Probs & Value Head</span>
+        </div>
+      </div>
+
+      <!-- Probabilities & Logits Chart -->
+      <div class="action-probs-container">
+        <h3>Action Probabilities (Masked Softmax)</h3>
+        <div id="action-bars-list" class="action-bars-list"></div>
+      </div>
+
+      <!-- Neural KPI Cards -->
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-title">Critic Value V(s)</span>
+          <strong id="kpi-value" class="kpi-val">—</strong>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">GRU Hidden Norm ||h||₂</span>
+          <strong id="kpi-gru" class="kpi-val">—</strong>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">Step Reward</span>
+          <strong id="kpi-step-reward" class="kpi-val">—</strong>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">Cumulative Reward</span>
+          <strong id="kpi-cum-reward" class="kpi-val">—</strong>
+        </div>
+      </div>
+
+      <!-- Selected Action & Transition Summary -->
+      <div class="decision-summary-card">
+        <div class="summary-row">
+          <span>Selected Action:</span>
+          <strong id="summary-action" class="action-pill">—</strong>
+        </div>
+        <div class="summary-row">
+          <span>Carrying Victim:</span>
+          <strong id="summary-carrying">—</strong>
+        </div>
+        <div class="summary-row">
+          <span>Discovered Victim:</span>
+          <strong id="summary-discovered">—</strong>
+        </div>
+      </div>
+
+      <!-- Event Markers List for Episode -->
+      <div class="events-log-container">
+        <h3>Episode Key Events</h3>
+        <div id="events-log-list" class="events-log-list">
+          <p class="empty-hint">No events registered yet.</p>
+        </div>
+      </div>
+    </div>
   </section>
-  <details id="raw-details" class="panel raw-panel"><summary>Complete action exchange <span>Input tensors, masks, logits, probabilities, features, rewards, simulator output, and next observation</span></summary><pre id="raw"></pre></details>
-  <footer>Runs a separate inspection episode. Checkpoint weights are not updated. The training process is untouched.</footer>
+
+  <!-- Bottom Details & Metadata -->
+  <section class="metadata-section">
+    <div class="metadata-card">
+      <h3>Episode Metadata & Verification</h3>
+      <div class="meta-row"><span>Scenario Seed:</span><strong id="meta-seed">—</strong></div>
+      <div class="meta-row"><span>Difficulty Tier:</span><strong id="meta-tier">—</strong></div>
+      <div class="meta-row"><span>Policy Mode:</span><strong id="meta-mode">—</strong></div>
+      <div class="meta-row"><span>Model Checkpoint:</span><strong id="meta-model">—</strong></div>
+      <div class="meta-row"><span>Model Hash (sha256):</span><code id="meta-hash">—</code></div>
+    </div>
+    <div class="metadata-card">
+      <h3>Outcome & Performance Metrics</h3>
+      <div class="meta-row"><span>Final Outcome:</span><strong id="perf-outcome">—</strong></div>
+      <div class="meta-row"><span>Total Timesteps:</span><strong id="perf-steps">—</strong></div>
+      <div class="meta-row"><span>Explored Map Coverage:</span><strong id="perf-coverage">—</strong></div>
+      <div class="meta-row"><span>2-Cell Oscillations:</span><strong id="perf-oscillations">—</strong></div>
+      <div class="meta-row"><span>Discovery Step:</span><strong id="perf-discovery">—</strong></div>
+      <div class="meta-row"><span>Pickup Step:</span><strong id="perf-pickup">—</strong></div>
+      <div class="meta-row"><span>Rescue Step:</span><strong id="perf-rescue">—</strong></div>
+    </div>
+  </section>
 </main>
 </body>
 </html>
