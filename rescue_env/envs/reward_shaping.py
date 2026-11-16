@@ -105,6 +105,7 @@ class RewardShaper:
     - Step penalty: -0.001 per step
     - First victim pickup: +1.5 per victim
     - Frontier exploration: +0.05 per newly uncovered cell in memory_map (capped at +3.0 per episode)
+    - Anti-oscillation penalty: -0.02 on repeating 2-cell limit cycles (A <-> B <-> A <-> B) while exploring
     """
 
     def __init__(
@@ -113,19 +114,28 @@ class RewardShaper:
         pickup_reward: float = 1.5,
         exploration_bonus: float = 0.05,
         max_exploration_reward: float = 3.0,
+        oscillation_penalty: float = 0.02,
     ):
         self.step_penalty = float(step_penalty)
         self.pickup_reward = float(pickup_reward)
         self.exploration_bonus = float(exploration_bonus)
         self.max_exploration_reward = float(max_exploration_reward)
+        self.oscillation_penalty = float(oscillation_penalty)
         self.rewarded_pickups = set()
         self.total_exploration_reward = 0.0
+        self.recent_positions: list[tuple[int, int]] = []
 
     def reset(self):
         self.rewarded_pickups.clear()
         self.total_exploration_reward = 0.0
+        self.recent_positions.clear()
 
-    def compute_reward(self, victims, newly_uncovered_cells: int = 0) -> float:
+    def compute_reward(
+        self,
+        victims,
+        newly_uncovered_cells: int = 0,
+        current_position: tuple[int, int] | None = None,
+    ) -> float:
         shaping = 0.0
 
         # Step penalty
@@ -150,6 +160,16 @@ class RewardShaper:
             actual_bonus = min(bonus, remaining)
             self.total_exploration_reward += actual_bonus
             shaping += actual_bonus
+
+        # Anti-oscillation penalty: discourage 2-cell limit cycles (A <-> B <-> A <-> B)
+        if not is_carrying and current_position is not None:
+            self.recent_positions.append(current_position)
+            if len(self.recent_positions) > 4:
+                self.recent_positions.pop(0)
+            if len(self.recent_positions) == 4:
+                p0, p1, p2, p3 = self.recent_positions
+                if p3 == p1 and p2 == p0 and p3 != p2:
+                    shaping -= self.oscillation_penalty
 
         return float(shaping)
 

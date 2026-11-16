@@ -149,7 +149,7 @@ def test_timeout_shaping():
 
 @pytest.mark.parametrize('seed', [20000, 20002])
 def test_empty_handed_exit_is_farther_from_pickup(seed):
-    env = RescueEnv(max_steps=64, victim_distance=3, navigation_shaping=True)
+    env = RescueEnv(max_steps=64, victim_distance=3, navigation_shaping=True, prevent_exterior_wandering=False)
     try:
         env.reset(seed=seed)
         before = state_potential(env.sim)

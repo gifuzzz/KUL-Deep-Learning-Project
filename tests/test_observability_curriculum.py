@@ -321,10 +321,18 @@ def test_requirement_8_action_masks_correct():
         # Action 5 (PICKUP) must be False because victim is at distance 8
         assert masks[5] == False, f"Pickup was legal at start in stage {obs_stage}"
 
-        # Raw actions mask from sim matches directional movement masks
+        # Raw actions mask from sim matches directional movement masks for interior cells;
+        # exterior grass is masked out when empty-handed (prevent_exterior_wandering=True)
         sim = env.unwrapped.sim
         raw = sim.observe(agent_id=0, visibility_radius=env.visibility_radius)
-        np.testing.assert_array_equal(masks[1:5], raw["actions_mask"][1:5])
+        deltas = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+        for act_idx, (dr, dc) in enumerate(deltas, start=1):
+            nr, nc = sim.agents[0]["r"] + dr, sim.agents[0]["c"] + dc
+            is_ext = nr < 0 or nr >= sim.h or nc < 0 or nc >= sim.w or sim.zone[nr, nc] < 0
+            if not is_ext:
+                assert bool(masks[act_idx]) == bool(raw["actions_mask"][act_idx])
+            else:
+                assert bool(masks[act_idx]) is False
         env.close()
 
 

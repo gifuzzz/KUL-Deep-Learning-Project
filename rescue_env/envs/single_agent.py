@@ -119,7 +119,8 @@ class RescueEnv(gym.Env):
                  memory_agent_marker=False, exploration_bonus=0.0,
                  geometry_reveal_fraction=0.0, reveal_victim=False,
                  observability_stage="A", task_type="full", discovery_reward=2.0,
-                 return_mode="legacy", return_level=None):
+                 return_mode="legacy", return_level=None, distance_metric="exit",
+                 prevent_exterior_wandering=True):
         super().__init__()
 
         self.max_steps = max_steps
@@ -136,6 +137,11 @@ class RescueEnv(gym.Env):
         if not np.isfinite(exploration_bonus) or exploration_bonus < 0:
             raise ValueError("exploration_bonus must be finite and nonnegative")
         self.exploration_bonus = exploration_bonus
+
+        if str(distance_metric).lower() not in ("exit", "spawn"):
+            raise ValueError(f"Unknown distance_metric: '{distance_metric}'. Valid: 'exit', 'spawn'")
+        self.distance_metric = str(distance_metric).lower()
+        self.prevent_exterior_wandering = bool(prevent_exterior_wandering)
 
         self.geometry_reveal_fraction = float(geometry_reveal_fraction)
         self.reveal_victim = bool(reveal_victim)
@@ -216,13 +222,22 @@ class RescueEnv(gym.Env):
         if exit_ is None:
             raise ValueError("No open exit found in the environment.")
 
-        start = e._cells_for_opening(exit_, exit_["zone_a"])
-
-        starts = [start]
-        if self.min_victim_distance > 1:
-            starts = [cell for o in e.openings
-                      if o["kind"] == "exit" and o["open"] and not o.get("blocked")
-                      for cell in e._portal_cells(o, o["zone_a"])]
+        if self.distance_metric == "spawn":
+            # True distance measured strictly from the firefighter's actual starting position
+            agent_spawn = (
+                (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
+                if len(self.sim.agents) > 0
+                else e._cells_for_opening(exit_, exit_["zone_a"])
+            )
+            starts = [agent_spawn]
+        else:
+            # Legacy behavior: starts from all exit portal cells when min_victim_distance > 1
+            start = e._cells_for_opening(exit_, exit_["zone_a"])
+            starts = [start]
+            if self.min_victim_distance > 1:
+                starts = [cell for o in e.openings
+                          if o["kind"] == "exit" and o["open"] and not o.get("blocked")
+                          for cell in e._portal_cells(o, o["zone_a"])]
         seen = set(starts)
         queue = deque((cell, 0) for cell in starts)
         candidates = []
@@ -571,7 +586,21 @@ class RescueEnv(gym.Env):
         )
         mask[6] = True
 
-        
+        if self.prevent_exterior_wandering and not carrying:
+            pr, pc = person["r"], person["c"]
+            deltas = ((-1, 0), (0, 1), (1, 0), (0, -1))
+            for action_idx, (dr, dc) in enumerate(deltas, start=1):
+                if mask[action_idx]:
+                    nr, nc = pr + dr, pc + dc
+                    is_exterior = (
+                        nr < 0
+                        or nr >= self.sim.h
+                        or nc < 0
+                        or nc >= self.sim.w
+                        or self.sim.zone[nr, nc] < 0
+                    )
+                    if is_exterior:
+                        mask[action_idx] = False
 
         return mask
 
@@ -660,6 +689,15 @@ class RescueEnv(gym.Env):
 
         # Close the previous simulator before creating another
         self.close()
+
+        if options:
+            if "distance_metric" in options:
+                dm = str(options["distance_metric"]).lower()
+                if dm not in ("exit", "spawn"):
+                    raise ValueError(f"Unknown distance_metric: '{dm}'. Valid: 'exit', 'spawn'")
+                self.distance_metric = dm
+            if "prevent_exterior_wandering" in options:
+                self.prevent_exterior_wandering = bool(options["prevent_exterior_wandering"])
 
         # Generate a reproducible episode seed
         episode_seed = int(
@@ -805,6 +843,7 @@ class RescueEnv(gym.Env):
             reward += self.reward_shaper.compute_reward(
                 result["victims"],
                 newly_uncovered_cells=newly_uncovered,
+                current_position=(self.sim.agents[0]["r"], self.sim.agents[0]["c"]),
             )
 
         # New optional navigation reward.

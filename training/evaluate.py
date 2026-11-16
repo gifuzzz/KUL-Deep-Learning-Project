@@ -163,6 +163,12 @@ def main():
         action="store_true",
         help="Include transient agent marker in memory observation channel",
     )
+    parser.add_argument(
+        "--distance-metric",
+        choices=["exit", "spawn"],
+        default="exit",
+        help="Victim distance metric: 'exit' (legacy, min distance to any exit) or 'spawn' (true distance to firefighter spawn)",
+    )
 
     args = parser.parse_args()
 
@@ -189,6 +195,7 @@ def main():
         reward_shaping=False,
         navigation_shaping=False,
         memory_agent_marker=args.memory_agent_marker,
+        distance_metric=args.distance_metric,
     )
     env = PreviousActionWrapper(raw_env)
 
@@ -204,7 +211,7 @@ def main():
 
     print(f"Device: {target_device}")
     print(f"Mode  : {'Random' if args.random else ('Deterministic' if deterministic else 'Sampled Stochastic')}")
-    print(f"Victim Distance: {victim_dist} | Max Steps: {args.max_steps} | Episodes: {args.episodes}")
+    print(f"Victim Distance: {victim_dist} (metric={args.distance_metric}) | Max Steps: {args.max_steps} | Episodes: {args.episodes}")
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)

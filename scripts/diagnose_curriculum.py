@@ -78,6 +78,7 @@ def evaluate_tier(
     geometry_reveal_fraction: float = 0.0,
     reveal_victim: bool = False,
     observability_stage: str = "A",
+    distance_metric: str = "exit",
 ) -> dict[str, float]:
     env = RescueEnv(
         victim_distance=victim_distance,
@@ -88,6 +89,7 @@ def evaluate_tier(
         geometry_reveal_fraction=geometry_reveal_fraction,
         reveal_victim=reveal_victim,
         observability_stage=observability_stage,
+        distance_metric=distance_metric,
     )
     env = PreviousActionWrapper(env)
 
@@ -193,6 +195,7 @@ def _eval_worker(task):
         geom_frac,
         rev_vict,
         obs_stg,
+        dist_metric,
     ) = task
     dummy_env = make_eval_env(victim_distance=2, max_steps=64)
     model = load_checkpoint(model_path, env=dummy_env, device=device)
@@ -209,6 +212,7 @@ def _eval_worker(task):
         geometry_reveal_fraction=geom_frac,
         reveal_victim=rev_vict,
         observability_stage=obs_stg,
+        distance_metric=dist_metric,
     )
     mode_str = "deterministic" if deterministic else "stochastic"
     print(
@@ -231,6 +235,7 @@ def run_full_diagnosis(
     geometry_reveal_fraction: float = 0.0,
     reveal_victim: bool = False,
     observability_stage: str = "A",
+    distance_metric: str = "exit",
 ) -> dict:
     if tiers is None:
         if preset == "legacy":
@@ -243,8 +248,8 @@ def run_full_diagnosis(
     if workers > 1:
         tasks = []
         for tier_name, dist, min_dist, max_s in tiers:
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device, geometry_reveal_fraction, reveal_victim, observability_stage))
-            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device, geometry_reveal_fraction, reveal_victim, observability_stage))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, True, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric))
+            tasks.append((model_path, tier_name, dist, min_dist, max_s, n_episodes, seed_start, False, device, geometry_reveal_fraction, reveal_victim, observability_stage, distance_metric))
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             worker_results = list(executor.map(_eval_worker, tasks))
         results = {tier[0]: {} for tier in tiers}
@@ -270,6 +275,7 @@ def run_full_diagnosis(
             geometry_reveal_fraction=geometry_reveal_fraction,
             reveal_victim=reveal_victim,
             observability_stage=observability_stage,
+            distance_metric=distance_metric,
         )
         print(f"[{tier_name}] deterministic: Rescue={det['rescue_success']:>5.1f}%, Pick={det['pickup_rate']:>5.1f}%, Disc={det['discovery_rate']:>5.1f}%, Osc={det['oscillation_frequency']:>4.1f}%", flush=True)
         stoch = evaluate_tier(
@@ -284,6 +290,7 @@ def run_full_diagnosis(
             geometry_reveal_fraction=geometry_reveal_fraction,
             reveal_victim=reveal_victim,
             observability_stage=observability_stage,
+            distance_metric=distance_metric,
         )
         print(f"[{tier_name}] stochastic   : Rescue={stoch['rescue_success']:>5.1f}%, Pick={stoch['pickup_rate']:>5.1f}%, Disc={stoch['discovery_rate']:>5.1f}%, Osc={stoch['oscillation_frequency']:>4.1f}%", flush=True)
         results[tier_name] = {
@@ -354,6 +361,12 @@ if __name__ == "__main__":
         default=None,
         help="Set observability visibility according to stage preset",
     )
+    parser.add_argument(
+        "--distance-metric",
+        choices=["exit", "spawn"],
+        default="exit",
+        help="Victim distance metric: 'exit' (legacy, min distance to any exit) or 'spawn' (true distance to firefighter spawn)",
+    )
     args = parser.parse_args()
 
     if args.observability_stage:
@@ -387,8 +400,9 @@ if __name__ == "__main__":
         geometry_reveal_fraction=args.geometry_reveal_fraction,
         reveal_victim=args.reveal_victim,
         observability_stage=args.observability_stage or "A",
+        distance_metric=args.distance_metric,
     )
-    print_table(res, args.model)
+    print_table(res, f"{args.model} (metric={args.distance_metric})")
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w") as f:

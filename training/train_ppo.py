@@ -602,6 +602,7 @@ def make_eval_env(
     victim_distance: int | None = 2,
     max_steps: int = 64,
     min_victim_distance: int = 1,
+    distance_metric: str = "exit",
 ) -> PreviousActionWrapper:
     """Unshaped evaluation environment (+10 native rescue only)."""
     env = RescueEnv(
@@ -610,6 +611,7 @@ def make_eval_env(
         min_victim_distance=min_victim_distance,
         reward_shaping=False,
         navigation_shaping=False,
+        distance_metric=distance_metric,
     )
     return PreviousActionWrapper(env)
 
@@ -1435,6 +1437,12 @@ def parse_args():
         action="store_true",
         help="Skip strict >=90%% qualification gate failure check (useful for test runs)",
     )
+    parser.add_argument(
+        "--tb-log-name",
+        type=str,
+        default=None,
+        help="Custom TensorBoard log folder name under logs/ (default: name of save-dir)",
+    )
     return parser.parse_args()
 
 
@@ -1571,6 +1579,15 @@ def main():
             tensorboard_log="./logs/",
             seed=args.seed,
         )
+
+    # Configure dedicated TensorBoard logger per run to prevent folder collisions
+    from stable_baselines3.common.logger import configure
+    tb_folder = args.tb_log_name or save_dir.name
+    tb_log_dir = Path("logs") / tb_folder
+    tb_log_dir.mkdir(parents=True, exist_ok=True)
+    custom_logger = configure(str(tb_log_dir), ["stdout", "tensorboard"])
+    model.set_logger(custom_logger)
+    print(f"TensorBoard logging configured to: {tb_log_dir}")
 
     try:
         # ---------------- STAGE 1 ----------------

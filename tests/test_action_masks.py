@@ -27,25 +27,26 @@ def test_initial_action_masks():
 
 
 def test_movement_masks():
-    env = RescueEnv()
+    # 1. When prevent_exterior_wandering=False, matches raw FlameBox masks exactly
+    env_raw = RescueEnv(prevent_exterior_wandering=False)
+    try:
+        env_raw.reset(seed=42)
+        mask_raw = env_raw.action_masks()
+        raw = env_raw.sim.observe(agent_id=0, visibility_radius=env_raw.visibility_radius)
+        np.testing.assert_array_equal(mask_raw[1:5], raw["actions_mask"][1:5])
+    finally:
+        env_raw.close()
 
+    # 2. When prevent_exterior_wandering=True (default), masks exterior grass when not carrying
+    env = RescueEnv(prevent_exterior_wandering=True)
     try:
         env.reset(seed=42)
-
         mask = env.action_masks()
-
-        # Compare Gymnasium movement masks
-        # with FlameBox's native movement masks.
-        raw = env.sim.observe(
-            agent_id=0,
-            visibility_radius=env.visibility_radius,
-        )
-
-        np.testing.assert_array_equal(
-            mask[1:5],
-            raw["actions_mask"][1:5],
-        )
-
+        # At seed 42, agent is at (13, 0) next to exit at col -1 (action 4 Left is exterior)
+        assert bool(mask[1]) is True   # Up (12, 0)
+        assert bool(mask[2]) is True   # Right (13, 1)
+        assert bool(mask[3]) is True   # Down (14, 0)
+        assert bool(mask[4]) is False  # Left (13, -1, exterior grass masked out)
     finally:
         env.close()
 
