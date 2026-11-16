@@ -52,6 +52,12 @@ DISTANCE_CONFIGS: dict[str, dict[str, Any]] = {
     "bridge_b": {"victim_distance": 10, "min_victim_distance": 7, "max_steps": 192},
     "bridge_c": {"victim_distance": 12, "min_victim_distance": 9, "max_steps": 256},
     "distant": {"victim_distance": None, "min_victim_distance": 1, "max_steps": 384},
+    # Spawn-relative ladder tiers (Phase 6)
+    "spawn_2_6": {"victim_distance": 6, "min_victim_distance": 2, "max_steps": 64},
+    "spawn_7_12": {"victim_distance": 12, "min_victim_distance": 7, "max_steps": 128},
+    "spawn_13_20": {"victim_distance": 20, "min_victim_distance": 13, "max_steps": 192},
+    "spawn_21_35": {"victim_distance": 35, "min_victim_distance": 21, "max_steps": 288},
+    "spawn_distant": {"victim_distance": None, "min_victim_distance": 1, "max_steps": 384},
 }
 
 
@@ -59,7 +65,7 @@ def normalize_stage(stage: int | str) -> int | str:
     """Normalize curriculum stage representation."""
     if isinstance(stage, str):
         s = stage.strip().upper()
-        if s in ("1", "2"):
+        if s in ("1", "2", "3"):
             return int(s)
         return s
     return stage
@@ -131,14 +137,21 @@ class CurriculumRescueEnv(RescueEnv):
         task_mixture: tuple[float, float, float] = (0.50, 0.25, 0.25),
         discovery_reward: float = 2.0,
         return_mode: str = "legacy",
+        distance_metric: str = "exit",
         **kwargs,
     ):
-        super().__init__(**kwargs)
-        self.stage = normalize_stage(stage)
+        norm_stage = normalize_stage(stage)
+        if norm_stage in (3, "3", "SPAWN") or str(substage).startswith("3") or str(substage).startswith("reinforce_spawn"):
+            if distance_metric == "exit":
+                distance_metric = "spawn"
+        super().__init__(distance_metric=distance_metric, **kwargs)
+        self.stage = norm_stage
         self.near_ratio = float(near_ratio)
         self.active_bridge = "bridge_a"
         if self.stage == "2C" and substage == "2A":
             self.substage = "2C_bridge8"
+        elif (self.stage in (3, "3", "SPAWN")) and (substage in ("2A", "2C_bridge8", "1")):
+            self.substage = "3A"
         else:
             self.substage = str(substage)
         self._update_active_bridge(self.substage)
@@ -158,6 +171,14 @@ class CurriculumRescueEnv(RescueEnv):
             self.active_bridge = "bridge_c"
         elif substage in ("2C_distant", "2D_balanced"):
             self.active_bridge = "bridge_c"
+        elif substage in ("3A", "3_tier1", "reinforce_spawn_near"):
+            self.active_bridge = "spawn_7_12"
+        elif substage in ("3B", "3_tier2", "reinforce_spawn_mid"):
+            self.active_bridge = "spawn_13_20"
+        elif substage in ("3C", "3_tier3"):
+            self.active_bridge = "spawn_21_35"
+        elif substage in ("3D", "3_balanced", "3_distant"):
+            self.active_bridge = "spawn_distant"
 
     def _apply_tier_config(self, tier_name: str) -> None:
         cfg = DISTANCE_CONFIGS[tier_name]
@@ -174,6 +195,9 @@ class CurriculumRescueEnv(RescueEnv):
             self._update_active_bridge(self.substage)
         elif self.stage == "2C" and self.substage in ("2A", "2B"):
             self.substage = "2C_bridge8"
+            self._update_active_bridge(self.substage)
+        elif self.stage in (3, "3", "SPAWN") and self.substage in ("2A", "2B", "2C_bridge8", "1"):
+            self.substage = "3A"
             self._update_active_bridge(self.substage)
 
     def set_observability_stage(self, stage: str) -> None:
@@ -224,6 +248,7 @@ class CurriculumRescueEnv(RescueEnv):
         roll = float(rng.random()) if rng is not None else float(np.random.random())
 
         is_auxiliary_task = False
+        is_stage3 = (self.stage in (3, "3", "SPAWN") or str(self.substage).startswith("3") or str(self.substage).startswith("reinforce_spawn"))
         if self.enable_multitask:
             roll_task = float(rng.random()) if rng is not None else float(np.random.random())
             p_full, p_return, p_discovery = self.task_mixture
@@ -233,48 +258,86 @@ class CurriculumRescueEnv(RescueEnv):
                 options["task_type"] = "return"
                 is_auxiliary_task = True
                 options["return_mode"] = self.return_mode
-                if self.return_mode == "route_complexity":
-                    # Sample route-complexity levels R1..R4
-                    roll_r = float(rng.random()) if rng is not None else float(np.random.random())
-                    if roll_r < 0.15:
-                        options["return_level"] = "R1"
-                        self._apply_tier_config("near")
-                    elif roll_r < 0.40:
-                        options["return_level"] = "R2"
-                        self._apply_tier_config("medium")
-                    elif roll_r < 0.70:
-                        options["return_level"] = "R3"
-                        self._apply_tier_config("bridge_b")
+                if is_stage3:
+                    if self.return_mode == "route_complexity":
+                        roll_r = float(rng.random()) if rng is not None else float(np.random.random())
+                        if roll_r < 0.15:
+                            options["return_level"] = "R1"
+                            self._apply_tier_config("spawn_2_6")
+                        elif roll_r < 0.40:
+                            options["return_level"] = "R2"
+                            self._apply_tier_config("spawn_7_12")
+                        elif roll_r < 0.70:
+                            options["return_level"] = "R3"
+                            self._apply_tier_config("spawn_13_20")
+                        else:
+                            options["return_level"] = "R4"
+                            self._apply_tier_config("spawn_21_35")
                     else:
-                        options["return_level"] = "R4"
-                        self._apply_tier_config("distant")
+                        options["return_mode"] = "legacy"
+                        roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                        if roll_tier < 0.20:
+                            self._apply_tier_config("spawn_7_12")
+                        elif roll_tier < 0.50:
+                            self._apply_tier_config("spawn_13_20")
+                        elif roll_tier < 0.80:
+                            self._apply_tier_config("spawn_21_35")
+                        else:
+                            self._apply_tier_config("spawn_distant")
                 else:
-                    options["return_mode"] = "legacy"
-                    # Legacy Phase 3 return tier sampling
-                    roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
-                    if roll_tier < 0.15:
-                        self._apply_tier_config("medium")
-                    elif roll_tier < 0.35:
-                        self._apply_tier_config("bridge_a")
-                    elif roll_tier < 0.65:
-                        self._apply_tier_config("bridge_b")
-                    elif roll_tier < 0.90:
-                        self._apply_tier_config("bridge_c")
+                    if self.return_mode == "route_complexity":
+                        # Sample route-complexity levels R1..R4
+                        roll_r = float(rng.random()) if rng is not None else float(np.random.random())
+                        if roll_r < 0.15:
+                            options["return_level"] = "R1"
+                            self._apply_tier_config("near")
+                        elif roll_r < 0.40:
+                            options["return_level"] = "R2"
+                            self._apply_tier_config("medium")
+                        elif roll_r < 0.70:
+                            options["return_level"] = "R3"
+                            self._apply_tier_config("bridge_b")
+                        else:
+                            options["return_level"] = "R4"
+                            self._apply_tier_config("distant")
                     else:
-                        self._apply_tier_config("distant")
+                        options["return_mode"] = "legacy"
+                        # Legacy Phase 3 return tier sampling
+                        roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                        if roll_tier < 0.15:
+                            self._apply_tier_config("medium")
+                        elif roll_tier < 0.35:
+                            self._apply_tier_config("bridge_a")
+                        elif roll_tier < 0.65:
+                            self._apply_tier_config("bridge_b")
+                        elif roll_tier < 0.90:
+                            self._apply_tier_config("bridge_c")
+                        else:
+                            self._apply_tier_config("distant")
             else:
                 options["task_type"] = "discovery"
                 is_auxiliary_task = True
-                # Discovery training: sample distant victim tier to train multi-room exploration
-                roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
-                if roll_tier < 0.20:
-                    self._apply_tier_config("bridge_a")
-                elif roll_tier < 0.50:
-                    self._apply_tier_config("bridge_b")
-                elif roll_tier < 0.80:
-                    self._apply_tier_config("bridge_c")
+                if is_stage3:
+                    roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                    if roll_tier < 0.20:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll_tier < 0.55:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll_tier < 0.85:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
                 else:
-                    self._apply_tier_config("distant")
+                    # Discovery training: sample distant victim tier to train multi-room exploration
+                    roll_tier = float(rng.random()) if rng is not None else float(np.random.random())
+                    if roll_tier < 0.20:
+                        self._apply_tier_config("bridge_a")
+                    elif roll_tier < 0.50:
+                        self._apply_tier_config("bridge_b")
+                    elif roll_tier < 0.80:
+                        self._apply_tier_config("bridge_c")
+                    else:
+                        self._apply_tier_config("distant")
 
             options["discovery_reward"] = self.discovery_reward
         else:
@@ -286,6 +349,60 @@ class CurriculumRescueEnv(RescueEnv):
                     self._apply_tier_config("near")
                 else:
                     self._apply_tier_config("medium")
+            elif is_stage3:
+                # Stage 3 Spawn-Relative Distance Curriculum
+                if self.substage == "reinforce_spawn_near":
+                    if roll < 0.60:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.90:
+                        self._apply_tier_config("spawn_7_12")
+                    else:
+                        self._apply_tier_config("spawn_13_20")
+                elif self.substage == "reinforce_spawn_mid":
+                    if roll < 0.30:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.75:
+                        self._apply_tier_config("spawn_7_12")
+                    else:
+                        self._apply_tier_config("spawn_13_20")
+                elif self.substage in ("3A", "3_tier1"):
+                    if roll < 0.40:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.80:
+                        self._apply_tier_config("spawn_7_12")
+                    else:
+                        self._apply_tier_config("spawn_13_20")
+                elif self.substage in ("3B", "3_tier2"):
+                    if roll < 0.20:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.50:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.85:
+                        self._apply_tier_config("spawn_13_20")
+                    else:
+                        self._apply_tier_config("spawn_21_35")
+                elif self.substage in ("3C", "3_tier3"):
+                    if roll < 0.15:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.35:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.60:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll < 0.85:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
+                else:  # 3D, 3_balanced, 3_distant
+                    if roll < 0.15:
+                        self._apply_tier_config("spawn_2_6")
+                    elif roll < 0.35:
+                        self._apply_tier_config("spawn_7_12")
+                    elif roll < 0.60:
+                        self._apply_tier_config("spawn_13_20")
+                    elif roll < 0.85:
+                        self._apply_tier_config("spawn_21_35")
+                    else:
+                        self._apply_tier_config("spawn_distant")
             elif self.stage == "2C" or str(self.substage).startswith("2C_") or self.substage in ("reinforce_near", "reinforce_medium"):
                 # Stage 2C Distance Bridge Curriculum
                 if self.substage == "reinforce_near":
@@ -471,6 +588,8 @@ class CurriculumRescueEnv(RescueEnv):
             options["geometry_reveal_fraction"] = 0.0
             options["reveal_victim"] = False
             options["observability_stage"] = "A"
+        if is_stage3:
+            options["distance_metric"] = "spawn"
 
         return super().reset(seed=seed, options=options)
 
@@ -519,6 +638,7 @@ def make_single_train_env(
     return_mode: str = "legacy",
     seed: int | None = None,
     geometry_mode: str = "edge",
+    distance_metric: str = "exit",
 ):
     """Factory creating an individual monitored environment."""
     def _init():
@@ -535,6 +655,7 @@ def make_single_train_env(
             discovery_reward=discovery_reward,
             return_mode=return_mode,
             geometry_mode=geometry_mode,
+            distance_metric=distance_metric,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -559,10 +680,13 @@ def make_train_env(
     n_envs: int = 8,
     base_seed: int = 42,
     geometry_mode: str = "edge",
+    distance_metric: str = "exit",
 ) -> DummyVecEnv | Monitor:
     """Create vectorized or single monitored training environment."""
     if normalize_stage(stage) == "2C" and substage == "2A":
         substage = "2C_bridge8"
+    elif normalize_stage(stage) in (3, "3", "SPAWN") and substage in ("2A", "2C_bridge8", "1"):
+        substage = "3A"
 
     if n_envs <= 1:
         env = CurriculumRescueEnv(
@@ -578,6 +702,7 @@ def make_train_env(
             discovery_reward=discovery_reward,
             return_mode=return_mode,
             geometry_mode=geometry_mode,
+            distance_metric=distance_metric,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout"))
@@ -597,6 +722,7 @@ def make_train_env(
             return_mode=return_mode,
             seed=base_seed + i * 1000,
             geometry_mode=geometry_mode,
+            distance_metric=distance_metric,
         )
         for i in range(n_envs)
     ]
@@ -761,12 +887,12 @@ class RecurrentMaskableEvalCallback(BaseCallback):
         med_succ: float = 0.0,
     ) -> bool:
         """Strict improvement evaluation policy with explicit tie-breaking."""
-        # In retention_aware mode, never save a new best if prerequisite near or medium retention is violated
-        if self.stage == "2C" and self.stage2c_mode == "retention_aware":
+        # In retention_aware mode or Stage 3, never save a new best if prerequisite near or medium retention is violated
+        if (self.stage == "2C" and self.stage2c_mode == "retention_aware") or (self.stage in (3, "3", "SPAWN")):
             if near_succ < 0.80 or med_succ < 0.25:
                 return False
 
-        # 1. Primary metric: Stage 2/2C hidden-victim rescue success (S_2 > 0)
+        # 1. Primary metric: Stage 2/2C/3 hidden-victim rescue success (S_2 > 0)
         if s2_succ > 0.0:
             if s2_succ > self.best_s2_success:
                 return True
@@ -787,8 +913,8 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                             return mean_len < self.best_mean_length - 2.0
             return False
 
-        # If s2_succ == 0, check bridge success if in stage 2C
-        if self.stage == "2C" and bridge_succ > 0.0 and near_succ >= 0.80:
+        # If s2_succ == 0, check bridge success if in stage 2C or 3
+        if (self.stage in ("2C", 3, "3", "SPAWN")) and bridge_succ > 0.0 and near_succ >= 0.80:
             if bridge_succ > self.best_bridge_success:
                 return True
             if bridge_succ == self.best_bridge_success:
@@ -879,7 +1005,16 @@ class RecurrentMaskableEvalCallback(BaseCallback):
                 )
 
             active_bridge_succ = 0.0
-            if self.current_substage == "2C_bridge8" and bridge_a_metrics:
+            if self.stage in (3, "3", "SPAWN"):
+                if self.current_substage in ("3A", "3_tier1") and med_metrics:
+                    active_bridge_succ = med_metrics["success_rate"]
+                elif self.current_substage in ("3B", "3_tier2") and bridge_a_metrics:
+                    active_bridge_succ = bridge_a_metrics["success_rate"]
+                elif self.current_substage in ("3C", "3_tier3") and bridge_b_metrics:
+                    active_bridge_succ = bridge_b_metrics["success_rate"]
+                elif self.current_substage in ("3D", "3_balanced", "3_distant"):
+                    active_bridge_succ = s2_metrics["success_rate"]
+            elif self.current_substage == "2C_bridge8" and bridge_a_metrics:
                 active_bridge_succ = bridge_a_metrics["success_rate"]
             elif self.current_substage == "2C_bridge10" and bridge_b_metrics:
                 active_bridge_succ = bridge_b_metrics["success_rate"]
@@ -891,18 +1026,28 @@ class RecurrentMaskableEvalCallback(BaseCallback):
 
             if self.verbose > 0:
                 bridge_str = ""
-                if bridge_a_metrics:
-                    bridge_str += f" | BrA(8): {bridge_a_metrics['success_rate']*100:.1f}%"
-                if bridge_b_metrics:
-                    bridge_str += f" | BrB(10): {bridge_b_metrics['success_rate']*100:.1f}%"
-                if bridge_c_metrics:
-                    bridge_str += f" | BrC(12): {bridge_c_metrics['success_rate']*100:.1f}%"
+                if self.stage in (3, "3", "SPAWN"):
+                    if bridge_a_metrics:
+                        bridge_str += f" | Sp13-20: {bridge_a_metrics['success_rate']*100:.1f}%"
+                    if bridge_b_metrics:
+                        bridge_str += f" | Sp21-35: {bridge_b_metrics['success_rate']*100:.1f}%"
+                    near_lbl = "Sp2-6"
+                    med_lbl = "Sp7-12"
+                else:
+                    if bridge_a_metrics:
+                        bridge_str += f" | BrA(8): {bridge_a_metrics['success_rate']*100:.1f}%"
+                    if bridge_b_metrics:
+                        bridge_str += f" | BrB(10): {bridge_b_metrics['success_rate']*100:.1f}%"
+                    if bridge_c_metrics:
+                        bridge_str += f" | BrC(12): {bridge_c_metrics['success_rate']*100:.1f}%"
+                    near_lbl = "Near Ret"
+                    med_lbl = "Med Succ"
 
                 print(
                     f"\n[Eval @ {self.num_timesteps} steps] Substage: {self.current_substage} | "
                     f"Distant Succ: {s2_metrics['success_rate']*100:.1f}% (Pick: {s2_metrics['pickup_rate']*100:.1f}%) | "
-                    f"Near Ret: {near_metrics['success_rate']*100:.1f}% | "
-                    f"Med Succ: {med_metrics['success_rate']*100:.1f}%"
+                    f"{near_lbl}: {near_metrics['success_rate']*100:.1f}% | "
+                    f"{med_lbl}: {med_metrics['success_rate']*100:.1f}%"
                     f"{bridge_str} | Mean Rew: {combined_reward:.3f}"
                 )
 
@@ -1045,7 +1190,74 @@ class RecurrentMaskableEvalCallback(BaseCallback):
 
             # Adaptive Curriculum Self-Healing & Progression
             if self.train_env is not None:
-                if self.stage == "2C" or str(self.current_substage).startswith(("2C_", "2D_")) or self.current_substage in ("reinforce_near", "reinforce_medium"):
+                if self.stage in (3, "3", "SPAWN") or str(self.current_substage).startswith("3") or self.current_substage in ("reinforce_spawn_near", "reinforce_spawn_mid"):
+                    spawn_near_succ = near_metrics["success_rate"]
+                    spawn_mid_succ = med_metrics["success_rate"]
+                    spawn_13_20_succ = bridge_a_metrics["success_rate"] if bridge_a_metrics else 0.0
+                    spawn_21_35_succ = bridge_b_metrics["success_rate"] if bridge_b_metrics else 0.0
+                    spawn_dist_succ = s2_metrics["success_rate"]
+
+                    # Dual-guard retention protection on spawn ladder
+                    if spawn_near_succ < 0.80 and self.current_substage != "reinforce_spawn_near":
+                        if self.current_substage != "reinforce_spawn_mid":
+                            self._prev_substage = self.current_substage
+                        self.current_substage = "reinforce_spawn_near"
+                        set_env_stage(self.train_env, stage=3, substage="reinforce_spawn_near")
+                        if self.verbose > 0:
+                            print(
+                                f"\n>>> Curriculum Alert [Guard 1]: Spawn 2-6 retention dropped below 80% "
+                                f"({spawn_near_succ*100:.1f}%). Shifting to 'reinforce_spawn_near' mode."
+                            )
+                    elif self.current_substage == "reinforce_spawn_near" and spawn_near_succ < 0.85:
+                        pass
+                    elif spawn_mid_succ < 0.25 and self.current_substage != "reinforce_spawn_mid":
+                        if self.current_substage != "reinforce_spawn_near":
+                            self._prev_substage = self.current_substage
+                        self.current_substage = "reinforce_spawn_mid"
+                        set_env_stage(self.train_env, stage=3, substage="reinforce_spawn_mid")
+                        if self.verbose > 0:
+                            print(
+                                f"\n>>> Curriculum Alert [Guard 2]: Spawn 7-12 success dropped below 25% "
+                                f"({spawn_mid_succ*100:.1f}%). Shifting to 'reinforce_spawn_mid' mode."
+                            )
+                    elif self.current_substage == "reinforce_spawn_mid" and spawn_mid_succ < 0.30:
+                        pass
+                    elif spawn_near_succ >= 0.85 and spawn_mid_succ >= 0.30:
+                        if self.current_substage in ("reinforce_spawn_near", "reinforce_spawn_mid"):
+                            resume_sub = getattr(self, "_prev_substage", "3A")
+                            self.current_substage = resume_sub
+                            set_env_stage(self.train_env, stage=3, substage=resume_sub)
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Recovered: Spawn dual guards satisfied (Near: {spawn_near_succ*100:.1f}%, "
+                                    f"Mid: {spawn_mid_succ*100:.1f}%). Resuming {resume_sub}."
+                                )
+
+                        if self.current_substage in ("3A", "3_tier1") and spawn_mid_succ >= 0.40:
+                            self.current_substage = "3B"
+                            set_env_stage(self.train_env, stage=3, substage="3B")
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Milestone: Spawn 2-6 >= 85%, Spawn 7-12 >= 40% "
+                                    f"({spawn_mid_succ*100:.1f}%). Advancing to 3B."
+                                )
+                        elif self.current_substage in ("3B", "3_tier2") and spawn_13_20_succ >= 0.20:
+                            self.current_substage = "3C"
+                            set_env_stage(self.train_env, stage=3, substage="3C")
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Milestone: Spawn 2-6 >= 85%, Spawn 7-12 >= 30%, Spawn 13-20 >= 20% "
+                                    f"({spawn_13_20_succ*100:.1f}%). Advancing to 3C."
+                                )
+                        elif self.current_substage in ("3C", "3_tier3") and spawn_21_35_succ >= 0.10:
+                            self.current_substage = "3D"
+                            set_env_stage(self.train_env, stage=3, substage="3D")
+                            if self.verbose > 0:
+                                print(
+                                    f"\n>>> Curriculum Milestone: Spawn 2-6 >= 85%, Spawn 7-12 >= 30%, Spawn 21-35 >= 10% "
+                                    f"({spawn_21_35_succ*100:.1f}%). Advancing to 3D."
+                                )
+                elif self.stage == "2C" or str(self.current_substage).startswith(("2C_", "2D_")) or self.current_substage in ("reinforce_near", "reinforce_medium"):
                     near_succ = near_metrics["success_rate"]
                     med_succ = med_metrics["success_rate"]
                     a_succ = bridge_a_metrics["success_rate"] if bridge_a_metrics else 0.0
@@ -1298,9 +1510,9 @@ def parse_args():
     )
     parser.add_argument(
         "--stage",
-        choices=["1", "2", "2C", "2c", "all"],
+        choices=["1", "2", "2C", "2c", "3", "3A", "3B", "3C", "3D", "spawn", "all"],
         default="all",
-        help="Curriculum stage to run: 1, 2, 2C, or all (default: all)",
+        help="Curriculum stage to run: 1, 2, 2C, 3 (spawn ladder), or all (default: all)",
     )
     parser.add_argument(
         "--total-timesteps",
@@ -1325,6 +1537,18 @@ def parse_args():
         type=int,
         default=500_000,
         help="Timesteps for Stage 2C Distance Bridge (default: 500,000)",
+    )
+    parser.add_argument(
+        "--stage3-timesteps",
+        type=int,
+        default=250_000,
+        help="Timesteps for Stage 3 Spawn Distance Curriculum (default: 250,000)",
+    )
+    parser.add_argument(
+        "--distance-metric",
+        choices=["exit", "spawn"],
+        default="exit",
+        help="Distance metric: 'exit' (legacy min exit dist) or 'spawn' (spawn-relative distance) (default: exit)",
     )
     parser.add_argument(
         "--device",
@@ -1524,6 +1748,7 @@ def main():
     stage1_steps = 0
     stage2_steps = 0
     stage2c_steps = 0
+    stage3_steps = 0
 
     stage_norm = normalize_stage(args.stage)
     if stage_norm == 1:
@@ -1532,6 +1757,8 @@ def main():
         stage2_steps = args.total_timesteps if args.total_timesteps is not None else args.stage2_timesteps
     elif stage_norm == "2C":
         stage2c_steps = args.total_timesteps if args.total_timesteps is not None else args.stage2c_timesteps
+    elif stage_norm in (3, "3", "3A", "3B", "3C", "3D", "SPAWN"):
+        stage3_steps = args.total_timesteps if args.total_timesteps is not None else args.stage3_timesteps
     else:  # "all"
         if args.total_timesteps is not None:
             total = args.total_timesteps
@@ -1543,15 +1770,20 @@ def main():
             stage1_steps = args.stage1_timesteps
             stage2_steps = args.stage2_timesteps
 
-    if stage_norm == "2C":
+    if stage_norm in (3, "3", "3A", "3B", "3C", "3D", "SPAWN"):
+        initial_stage = 3
+    elif stage_norm == "2C":
         initial_stage = "2C"
     elif stage_norm == 2:
         initial_stage = 2
     else:
         initial_stage = 1
 
+    dist_metric = "spawn" if (stage_norm in (3, "3", "3A", "3B", "3C", "3D", "SPAWN") or args.distance_metric == "spawn") else "exit"
+
     train_env = make_train_env(
         stage=initial_stage,
+        substage=args.initial_substage or ("3A" if initial_stage == 3 else ("2C_bridge8" if initial_stage == "2C" else "2A")),
         reward_shaping=True,
         navigation_shaping=args.navigation_shaping,
         near_ratio=args.near_ratio,
@@ -1564,8 +1796,9 @@ def main():
         n_envs=args.n_envs,
         base_seed=args.seed,
         geometry_mode=args.geometry_mode,
+        distance_metric=dist_metric,
     )
-    eval_env = make_eval_env(victim_distance=2, max_steps=64, geometry_mode=args.geometry_mode)
+    eval_env = make_eval_env(victim_distance=2, max_steps=64, distance_metric=dist_metric, geometry_mode=args.geometry_mode)
 
     if args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")
@@ -1772,8 +2005,65 @@ def main():
             )
             print(f"Stage 2C completed. Model saved to {stage2c_final}")
 
+        # ---------------- STAGE 3 (Spawn-Relative Distance Curriculum) ----------------
+        if stage3_steps > 0:
+            print(f"\n>>> Starting Stage 3: Spawn-Relative Distance Curriculum ({stage3_steps} steps, {args.n_envs} envs, metric=spawn)")
+            initial_sub = args.initial_substage or "3A"
+            set_env_stage(train_env, stage=3, substage=initial_sub)
+            stage3_dir = save_dir / "stage3_spawn_curriculum"
+            stage3_dir.mkdir(parents=True, exist_ok=True)
+
+            eval_env_stage2 = make_eval_env(victim_distance=None, max_steps=384, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_near = make_eval_env(victim_distance=6, min_victim_distance=2, max_steps=64, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_med = make_eval_env(victim_distance=12, min_victim_distance=7, max_steps=128, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_bridge_a = make_eval_env(victim_distance=20, min_victim_distance=13, max_steps=192, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_bridge_b = make_eval_env(victim_distance=35, min_victim_distance=21, max_steps=288, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_bridge_c = None
+
+            callback3 = RecurrentMaskableEvalCallback(
+                eval_env_stage2=eval_env_stage2,
+                eval_env_near=eval_env_near,
+                eval_env_med=eval_env_med,
+                eval_env_bridge_a=eval_env_bridge_a,
+                eval_env_bridge_b=eval_env_bridge_b,
+                eval_env_bridge_c=eval_env_bridge_c,
+                train_env=train_env,
+                stage=3,
+                initial_substage=initial_sub,
+                best_model_save_path=stage3_dir,
+                eval_freq=args.eval_freq,
+                n_eval_episodes=args.n_eval_episodes,
+                deterministic=True,
+                hyperparameters=hyperparameters,
+                seed_start=50000,
+                checkpoint_freq=args.checkpoint_freq,
+                observability_mode=args.observability_mode,
+                initial_observability_stage=obs_stage,
+                total_timesteps=stage3_steps,
+            )
+
+            model.learn(
+                total_timesteps=stage3_steps,
+                callback=callback3,
+                tb_log_name="PPO_Curriculum_Stage3_Spawn",
+                reset_num_timesteps=False,
+            )
+            eval_env_stage2.close()
+            eval_env_near.close()
+            eval_env_med.close()
+            eval_env_bridge_a.close()
+            eval_env_bridge_b.close()
+
+            stage3_final = stage3_dir / "stage3_final.zip"
+            save_checkpoint(
+                model,
+                stage3_final,
+                metadata={"stage": 3, "hyperparameters": hyperparameters},
+            )
+            print(f"Stage 3 completed. Model saved to {stage3_final}")
+
         final_model_path = save_dir / "final_model.zip"
-        final_stage = "2C" if stage2c_steps > 0 else (2 if stage2_steps > 0 else 1)
+        final_stage = 3 if stage3_steps > 0 else ("2C" if stage2c_steps > 0 else (2 if stage2_steps > 0 else 1))
         save_checkpoint(
             model,
             final_model_path,

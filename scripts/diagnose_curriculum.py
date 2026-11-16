@@ -65,6 +65,14 @@ BRIDGE_TIERS = [
     ("Bridge C (d=12, steps=256)", 12, 9, 256),
 ]
 
+SPAWN_TIERS = [
+    ("Spawn 2-6 (d=2..6, steps=64)", 6, 2, 64),
+    ("Spawn 7-12 (d=7..12, steps=128)", 12, 7, 128),
+    ("Spawn 13-20 (d=13..20, steps=192)", 20, 13, 192),
+    ("Spawn 21-35 (d=21..35, steps=288)", 35, 21, 288),
+    ("Distant (d=None, steps=384)", None, 1, 384),
+]
+
 
 def evaluate_tier(
     model,
@@ -261,7 +269,11 @@ def run_full_diagnosis(
     geometry_mode: str = "edge",
 ) -> dict:
     if tiers is None:
-        if preset == "legacy":
+        if preset in ("spawn", "spawn_ladder"):
+            tiers = SPAWN_TIERS
+            if distance_metric == "exit":
+                distance_metric = "spawn"
+        elif preset == "legacy":
             tiers = LEGACY_TIERS
         elif preset == "bridge":
             tiers = BRIDGE_TIERS
@@ -356,9 +368,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed-start", type=int, default=50000)
     parser.add_argument(
         "--tier",
-        choices=["all", "legacy", "bridge"],
+        choices=["all", "legacy", "bridge", "spawn", "spawn_ladder"],
         default="all",
-        help="Evaluation tiers: all (2, 6, 8, 10, 12, Distant), legacy (2, 6, Distant), or bridge (8, 10, 12)",
+        help="Evaluation tiers: all (2, 6, 8, 10, 12, Distant), legacy (2, 6, Distant), bridge (8, 10, 12), or spawn (2-6, 7-12, 13-20, 21-35, Distant)",
     )
     parser.add_argument(
         "--architecture",
@@ -431,10 +443,11 @@ if __name__ == "__main__":
         geometry_reveal_fraction=args.geometry_reveal_fraction,
         reveal_victim=args.reveal_victim,
         observability_stage=args.observability_stage or "A",
-        distance_metric=args.distance_metric,
+        distance_metric="spawn" if args.tier in ("spawn", "spawn_ladder") and args.distance_metric == "exit" else args.distance_metric,
         geometry_mode=args.geometry_mode,
     )
-    print_table(res, f"{args.model} (metric={args.distance_metric}, geom={args.geometry_mode})")
+    metric_display = "spawn" if args.tier in ("spawn", "spawn_ladder") and args.distance_metric == "exit" else args.distance_metric
+    print_table(res, f"{args.model} (metric={metric_display}, geom={args.geometry_mode})")
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w") as f:
