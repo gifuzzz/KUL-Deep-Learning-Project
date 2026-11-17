@@ -1,0 +1,151 @@
+{
+  "model_path": "models/phase9_control/final_model.zip",
+  "zero_ablate": false,
+  "spatial_memory_mode": "none",
+  "stages": {
+    "B1": {
+      "deterministic": {
+        "stage": "B1",
+        "episodes": 200,
+        "deterministic": true,
+        "correct_branch_selection_rate": 35.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 48.0,
+        "mean_unique_cells_visited": 42.685,
+        "mean_unique_rooms_entered": 1.99,
+        "mean_time_to_first_new_territory": 2.3618090452261304,
+        "mean_wait_fraction": 0.0,
+        "mean_max_wait_streak": 0.0,
+        "mean_oscillation_pct": 33.734375,
+        "mean_doorway_reversals": 0.18,
+        "new_territory_after_step_50_rate": 22.0,
+        "mean_episode_length": 64.0
+      },
+      "stochastic": {
+        "stage": "B1",
+        "episodes": 200,
+        "deterministic": false,
+        "correct_branch_selection_rate": 30.5,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 55.00000000000001,
+        "mean_unique_cells_visited": 51.655,
+        "mean_unique_rooms_entered": 2.17,
+        "mean_time_to_first_new_territory": 2.3,
+        "mean_wait_fraction": 0.00625,
+        "mean_max_wait_streak": 0.29,
+        "mean_oscillation_pct": 6.8984375,
+        "mean_doorway_reversals": 0.165,
+        "new_territory_after_step_50_rate": 87.0,
+        "mean_episode_length": 64.0
+      }
+    },
+    "B2": {
+      "deterministic": {
+        "stage": "B2",
+        "episodes": 200,
+        "deterministic": true,
+        "correct_branch_selection_rate": 21.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 22.5,
+        "mean_unique_cells_visited": 43.53,
+        "mean_unique_rooms_entered": 1.82,
+        "mean_time_to_first_new_territory": 1.735,
+        "mean_wait_fraction": 0.0,
+        "mean_max_wait_streak": 0.0,
+        "mean_oscillation_pct": 47.81640625,
+        "mean_doorway_reversals": 0.005,
+        "new_territory_after_step_50_rate": 35.0,
+        "mean_episode_length": 128.0
+      },
+      "stochastic": {
+        "stage": "B2",
+        "episodes": 200,
+        "deterministic": false,
+        "correct_branch_selection_rate": 19.5,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 28.499999999999996,
+        "mean_unique_cells_visited": 67.395,
+        "mean_unique_rooms_entered": 2.305,
+        "mean_time_to_first_new_territory": 1.93,
+        "mean_wait_fraction": 0.0083203125,
+        "mean_max_wait_streak": 0.575,
+        "mean_oscillation_pct": 9.14453125,
+        "mean_doorway_reversals": 0.245,
+        "new_territory_after_step_50_rate": 99.0,
+        "mean_episode_length": 128.0
+      }
+    },
+    "B3": {
+      "deterministic": {
+        "stage": "B3",
+        "episodes": 200,
+        "deterministic": true,
+        "correct_branch_selection_rate": 0.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 0.0,
+        "mean_unique_cells_visited": 40.715,
+        "mean_unique_rooms_entered": 2.19,
+        "mean_time_to_first_new_territory": 2.712121212121212,
+        "mean_wait_fraction": 0.0,
+        "mean_max_wait_streak": 0.0,
+        "mean_oscillation_pct": 51.45833333333333,
+        "mean_doorway_reversals": 1.45,
+        "new_territory_after_step_50_rate": 33.0,
+        "mean_episode_length": 192.0
+      },
+      "stochastic": {
+        "stage": "B3",
+        "episodes": 200,
+        "deterministic": false,
+        "correct_branch_selection_rate": 0.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 0.0,
+        "mean_unique_cells_visited": 73.315,
+        "mean_unique_rooms_entered": 2.66,
+        "mean_time_to_first_new_territory": 1.6,
+        "mean_wait_fraction": 0.010104166666666666,
+        "mean_max_wait_streak": 0.745,
+        "mean_oscillation_pct": 10.505208333333336,
+        "mean_doorway_reversals": 0.295,
+        "new_territory_after_step_50_rate": 99.5,
+        "mean_episode_length": 192.0
+      }
+    },
+    "B4": {
+      "deterministic": {
+        "stage": "B4",
+        "episodes": 200,
+        "deterministic": true,
+        "correct_branch_selection_rate": 0.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 0.0,
+        "mean_unique_cells_visited": 41.965,
+        "mean_unique_rooms_entered": 1.87,
+        "mean_time_to_first_new_territory": 1.0,
+        "mean_wait_fraction": 0.0,
+        "mean_max_wait_streak": 0.0,
+        "mean_oscillation_pct": 58.94921875,
+        "mean_doorway_reversals": 0.99,
+        "new_territory_after_step_50_rate": 46.0,
+        "mean_episode_length": 384.0
+      },
+      "stochastic": {
+        "stage": "B4",
+        "episodes": 200,
+        "deterministic": false,
+        "correct_branch_selection_rate": 0.0,
+        "junction_exit_rate": 100.0,
+        "new_branch_entry_rate": 0.0,
+        "mean_unique_cells_visited": 91.345,
+        "mean_unique_rooms_entered": 2.49,
+        "mean_time_to_first_new_territory": 1.005,
+        "mean_wait_fraction": 0.010104166666666666,
+        "mean_max_wait_streak": 0.985,
+        "mean_oscillation_pct": 10.908854166666668,
+        "mean_doorway_reversals": 0.395,
+        "new_territory_after_step_50_rate": 100.0,
+        "mean_episode_length": 384.0
+      }
+    }
+  }
+}

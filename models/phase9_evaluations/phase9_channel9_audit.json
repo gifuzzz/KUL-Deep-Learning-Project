@@ -1,0 +1,95 @@
+{
+  "weights_progression": {
+    "Variant B (Binary Visited)": {
+      "Step 0 (init)": {
+        "checkpoint": "initial_checkpoint.zip",
+        "norm": 0.0,
+        "mean_abs": 0.0,
+        "max_abs": 0.0,
+        "std": 0.0,
+        "nonzero_count": 0,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.051630973815918,
+        "ratio_to_pretrained_norm_pct": 0.0
+      },
+      "Best Model": {
+        "checkpoint": "best_navigation_model.zip",
+        "norm": 0.13291007280349731,
+        "mean_abs": 0.005436057224869728,
+        "max_abs": 0.027959156781435013,
+        "std": 0.0076559167355299,
+        "nonzero_count": 235,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.054203987121582,
+        "ratio_to_pretrained_norm_pct": 4.351709098800493
+      },
+      "Step 50k (ckpt)": {
+        "checkpoint": "checkpoint_50000.zip",
+        "norm": 0.22223398089408875,
+        "mean_abs": 0.009444640949368477,
+        "max_abs": 0.03898229822516441,
+        "std": 0.013097081333398819,
+        "nonzero_count": 242,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.060939073562622,
+        "ratio_to_pretrained_norm_pct": 7.260320298875827
+      },
+      "Step 50k (final)": {
+        "checkpoint": "final_model.zip",
+        "norm": 0.22223398089408875,
+        "mean_abs": 0.009444640949368477,
+        "max_abs": 0.03898229822516441,
+        "std": 0.013097081333398819,
+        "nonzero_count": 242,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.060939073562622,
+        "ratio_to_pretrained_norm_pct": 7.260320298875827
+      }
+    }
+  },
+  "optimizer_moments": {
+    "Variant B (Binary Visited)": {
+      "Step 50k (ckpt)": {
+        "checkpoint": "checkpoint_50000.zip",
+        "adam_step": 3136.0,
+        "first_moment_norm": 0.003342351643368602,
+        "second_moment_norm": 2.6388051992398687e-05,
+        "nonzero_first_moment": 215,
+        "nonzero_second_moment": 236,
+        "pretrained_first_moment_avg": 0.002604028417004479,
+        "pretrained_second_moment_avg": 7.637055306178e-05
+      },
+      "Step 50k (final)": {
+        "checkpoint": "final_model.zip",
+        "adam_step": 3136.0,
+        "first_moment_norm": 0.003342351643368602,
+        "second_moment_norm": 2.6388051992398687e-05,
+        "nonzero_first_moment": 215,
+        "nonzero_second_moment": 236,
+        "pretrained_first_moment_avg": 0.002604028417004479,
+        "pretrained_second_moment_avg": 7.637055306178e-05
+      }
+    }
+  },
+  "active_gradients": {
+    "loss": 5.396814823150635,
+    "timesteps": 16,
+    "channel9_grad_norm": 2.102985143661499,
+    "channel9_mean_abs_grad": 0.04360266029834747,
+    "channel9_peak_abs_grad": 0.6862261891365051,
+    "nonzero_grad_count": 104,
+    "pretrained_baseline_grad_norm": 2.9572091102600098,
+    "ratio_to_baseline_pct": 71.11384637512482
+  },
+  "logit_sensitivity": {
+    "n_states_evaluated": 30,
+    "zero_ablation": {
+      "mean_max_logit_delta": 0.017690451939900716,
+      "peak_max_logit_delta": 0.06814956665039062,
+      "mean_total_variation_prob_delta": 0.002866244358786692,
+      "peak_total_variation_prob_delta": 0.01228960882872343,
+      "mean_value_delta": 0.008233888943990072,
+      "peak_value_delta": 0.0316317081451416
+    }
+  }
+}

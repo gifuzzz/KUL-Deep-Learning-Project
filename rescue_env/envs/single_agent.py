@@ -157,11 +157,19 @@ class RescueEnv(gym.Env):
         self.reveal_victim = bool(reveal_victim)
         self.observability_stage = str(observability_stage)
 
-        if str(task_type).lower() not in ("full", "return", "discovery", "exploration_only"):
-            raise ValueError(f"Unknown task_type: '{task_type}'. Valid: 'full', 'return', 'discovery', 'exploration_only'")
+        if str(task_type).lower() not in ("full", "return", "discovery", "exploration_only", "branching_exploration"):
+            raise ValueError(f"Unknown task_type: '{task_type}'. Valid: 'full', 'return', 'discovery', 'exploration_only', 'branching_exploration'")
         self.task_type = str(task_type).lower()
         self.discovery_reward = float(discovery_reward)
         self._discovery_completed = False
+
+        self.branching_stage = "B1"
+        self.unvisited_cell_bonus = 0.15
+        self.unvisited_room_bonus = 1.0
+        self.branch_entry_bonus = 1.0
+        self.wait_streak_penalty = 0.005
+        self.oscillation_penalty = 0.02
+        self.step_penalty = 0.001
 
         self.coverage_target = float(coverage_target)
         self.exploration_cell_bonus = float(exploration_cell_bonus)
@@ -471,6 +479,8 @@ class RescueEnv(gym.Env):
                 self.memory.grid[4, r, c] = float(e.debris[r, c] > 0)
                 self.memory.grid[5, r, c] = 1.0
                 self.memory.explored[r, c] = 1.0
+                if hasattr(self.memory, "visited"):
+                    self.memory.visited[r, c] = 1.0
 
                 # Also observe immediate adjacent open cells visible from path
                 neighbors = (
@@ -593,6 +603,290 @@ class RescueEnv(gym.Env):
         # Populate memory map with physical observations along traveled path + branches
         self._populate_path_memory(path, exit_opening, (vr, vc), additional_cells=branch_cells)
 
+    def _replay_trajectory(self, path_cells: list[tuple[int, int]]):
+        """Physically replay a sequence of cells to legitimately observe and mark visited cells."""
+        if not path_cells:
+            return
+        e = self.sim
+        for idx, (r, c) in enumerate(path_cells):
+            e.agents[0]["r"] = r
+            e.agents[0]["c"] = c
+            e._core.set_people(e.victims, e.agents[:1])
+            e.tick(0)
+            raw = e.observe(agent_id=0, visibility_radius=self.visibility_radius)
+            local_grid = self._extract_local_grid(raw, e.agents[0])
+            self.memory.update(
+                local_grid=local_grid,
+                agent_position=(r, c),
+                step_idx=idx,
+            )
+            if (r, c) in self._reachable_interior_cells:
+                self._visited_reachable_cells.add((r, c))
+            zone = e.zone[r, c]
+            if zone >= 0:
+                self._visited_rooms.add(zone)
+
+        # Place agent at final cell of replay
+        last_r, last_c = path_cells[-1]
+        e.agents[0]["r"] = last_r
+        e.agents[0]["c"] = last_c
+        e._core.set_people(e.victims, e.agents[:1])
+        e.tick(0)
+
+    def _setup_branching_task(
+        self,
+        branching_stage: str = "B1",
+        swap_visited_branch: bool = False,
+        rng=None,
+    ):
+        """Configure scenario with controlled branching complexity and legitimate physical visit history.
+
+        Stages:
+        - B1 (Single Junction): 2 traversable branches connected to a common junction. One branch
+          pre-visited, one unvisited. Agent starts at junction.
+        - B2 (Multiple Junctions): 2 sequential junctions. Path through J1 to J2 and dead-end visited.
+          Agent placed at J1 (or J2) requiring backtracking / choice of unvisited branch.
+        - B3 (Multi-Room Navigation): 1-2 visited rooms via connecting corridors. 1-2 unvisited rooms
+          beyond doorways. Agent placed in visited corridor/room.
+        - B4 (Full Procedural Building): Full unknown 30x46 layout, normal start at exit.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        sim = self.sim
+        h, w = sim.h, sim.w
+        exit_opening = next((o for o in sim.openings if o["kind"] == "exit" and o["open"] and not o.get("blocked")), None)
+        if exit_opening is None:
+            return
+
+        start = sim._cells_for_opening(exit_opening, exit_opening["zone_a"])
+
+        def get_nbrs(r, c):
+            nbrs = []
+            if r > 0 and sim.south[r - 1, c] >= 0.5 and not sim.debris[r - 1, c]:
+                nbrs.append(((r - 1, c), 1))
+            if c + 1 < w and sim.east[r, c] >= 0.5 and not sim.debris[r, c + 1]:
+                nbrs.append(((r, c + 1), 2))
+            if r + 1 < h and sim.south[r, c] >= 0.5 and not sim.debris[r + 1, c]:
+                nbrs.append(((r + 1, c), 3))
+            if c > 0 and sim.east[r, c - 1] >= 0.5 and not sim.debris[r, c - 1]:
+                nbrs.append(((r, c - 1), 4))
+            return nbrs
+
+        # BFS from start
+        queue = deque([start])
+        parent = {start: None}
+        dist = {start: 0}
+        ordered_cells = []
+        while queue:
+            curr = queue.popleft()
+            ordered_cells.append(curr)
+            for nbr, act in get_nbrs(*curr):
+                if nbr not in parent:
+                    parent[nbr] = curr
+                    dist[nbr] = dist[curr] + 1
+                    queue.append(nbr)
+
+        stage_str = str(branching_stage).upper()
+        self.branching_stage = stage_str
+        self.branching_decision_made = False
+        self.branching_correct_decision = None
+        self.branching_entered_new_branch = False
+        self.branching_visited_action = 0
+        self.branching_unvisited_action = 0
+        self.branching_stem_action = 0
+        self.branching_junction = start
+        self.branching_visited_cells = set()
+        self.branching_unvisited_cells = set()
+        self._first_new_territory_step = None
+        self._new_cells_after_step_50 = 0
+        self._junction_exited = False
+        self._branch_entry_rewarded = False
+        self._rewarded_rooms = set(self._visited_rooms)
+
+        if stage_str == "B1":
+            cand_junctions = []
+            for cell, d in dist.items():
+                if 2 <= d <= 12:
+                    nbrs = get_nbrs(*cell)
+                    p = parent[cell]
+                    non_p = [n for n in nbrs if n[0] != p]
+                    if len(non_p) >= 2:
+                        cand_junctions.append((cell, non_p, p))
+            if not cand_junctions:
+                for cell, d in dist.items():
+                    nbrs = get_nbrs(*cell)
+                    p = parent[cell]
+                    non_p = [n for n in nbrs if n[0] != p]
+                    if len(non_p) >= 2:
+                        cand_junctions.append((cell, non_p, p))
+                        break
+
+            if cand_junctions:
+                j_idx = int(rng.integers(len(cand_junctions)))
+                junction, non_p_nbrs, parent_cell = cand_junctions[j_idx]
+                curr = junction
+                stem = []
+                while curr is not None:
+                    stem.append(curr)
+                    curr = parent[curr]
+                stem.reverse()
+
+                perm = rng.permutation(len(non_p_nbrs))
+                idx_a = perm[1] if swap_visited_branch else perm[0]
+                idx_b = perm[0] if swap_visited_branch else perm[1]
+
+                b_a_start, act_visited = non_p_nbrs[idx_a]
+                b_b_start, act_unvisited = non_p_nbrs[idx_b]
+
+                branch_a_cells = [b_a_start]
+                b_curr = b_a_start
+                b_visited = set(stem) | {b_a_start}
+                branch_len = int(rng.integers(2, 5))
+                for _ in range(branch_len):
+                    b_nbrs = [n[0] for n in get_nbrs(*b_curr) if n[0] not in b_visited]
+                    if not b_nbrs:
+                        break
+                    nxt = b_nbrs[int(rng.integers(len(b_nbrs)))]
+                    branch_a_cells.append(nxt)
+                    b_visited.add(nxt)
+                    b_curr = nxt
+
+                branch_b_cells = [b_b_start]
+                b_curr = b_b_start
+                b_seen = set(stem) | set(branch_a_cells) | {b_b_start}
+                for _ in range(branch_len):
+                    b_nbrs = [n[0] for n in get_nbrs(*b_curr) if n[0] not in b_seen]
+                    if not b_nbrs:
+                        break
+                    nxt = b_nbrs[int(rng.integers(len(b_nbrs)))]
+                    branch_b_cells.append(nxt)
+                    b_seen.add(nxt)
+                    b_curr = nxt
+
+                stem_act = next((act for nbr, act in get_nbrs(*junction) if nbr == parent_cell), 0)
+                replay_path = list(stem) + list(branch_a_cells) + list(reversed(branch_a_cells[:-1])) + [junction]
+
+                self.branching_junction = junction
+                self.branching_visited_action = int(act_visited)
+                self.branching_unvisited_action = int(act_unvisited)
+                self.branching_stem_action = int(stem_act)
+                self.branching_visited_cells = set(branch_a_cells)
+                self.branching_unvisited_cells = set(branch_b_cells)
+                self.max_steps = 64
+
+                self._replay_trajectory(replay_path)
+
+        elif stage_str == "B2":
+            cand_b2 = []
+            for cell, d in dist.items():
+                if 2 <= d <= 10:
+                    nbrs = get_nbrs(*cell)
+                    p = parent[cell]
+                    non_p = [n for n in nbrs if n[0] != p]
+                    if len(non_p) >= 2:
+                        for nbr1, act1 in non_p:
+                            q2 = deque([(nbr1, [nbr1])])
+                            seen2 = {cell, nbr1}
+                            while q2:
+                                c2, path2 = q2.popleft()
+                                nbrs2 = [n for n in get_nbrs(*c2) if n[0] not in seen2]
+                                if len(nbrs2) >= 2 and len(path2) >= 2:
+                                    cand_b2.append((cell, non_p, p, c2, path2, nbrs2))
+                                    break
+                                for n2, a2 in nbrs2:
+                                    seen2.add(n2)
+                                    q2.append((n2, path2 + [n2]))
+                                if len(cand_b2) > 5:
+                                    break
+                if len(cand_b2) > 5:
+                    break
+
+            if cand_b2:
+                j_idx = int(rng.integers(len(cand_b2)))
+                j1, non_p1, p1, j2, path_j1_j2, nbrs_j2 = cand_b2[j_idx]
+                curr = j1
+                stem = []
+                while curr is not None:
+                    stem.append(curr)
+                    curr = parent[curr]
+                stem.reverse()
+
+                cand_b1 = [n for n in non_p1 if n[0] != path_j1_j2[0]]
+                b1_nbr, act_unvisited = cand_b1[0] if cand_b1 else non_p1[0]
+                b2_nbr, act_visited_j2 = nbrs_j2[0]
+
+                branch_a2 = [b2_nbr]
+                b_seen = set(stem) | set(path_j1_j2) | {j2, b2_nbr}
+                b_curr = b2_nbr
+                for _ in range(int(rng.integers(2, 4))):
+                    nb = [n[0] for n in get_nbrs(*b_curr) if n[0] not in b_seen]
+                    if not nb:
+                        break
+                    nxt = nb[int(rng.integers(len(nb)))]
+                    branch_a2.append(nxt)
+                    b_seen.add(nxt)
+                    b_curr = nxt
+
+                replay_path = (
+                    list(stem)
+                    + list(path_j1_j2)
+                    + list(branch_a2)
+                    + list(reversed(branch_a2[:-1]))
+                    + [j2]
+                    + list(reversed(path_j1_j2[:-1]))
+                    + [j1]
+                )
+                stem_act = next((act for nbr, act in get_nbrs(*j1) if nbr == p1), 0)
+                act_visited = next((act for nbr, act in get_nbrs(*j1) if nbr == path_j1_j2[0]), 0)
+
+                self.branching_junction = j1
+                self.branching_visited_action = int(act_visited)
+                self.branching_unvisited_action = int(act_unvisited)
+                self.branching_stem_action = int(stem_act)
+                self.branching_visited_cells = set(path_j1_j2) | set(branch_a2)
+                self.branching_unvisited_cells = {b1_nbr}
+                self.max_steps = 128
+
+                self._replay_trajectory(replay_path)
+            else:
+                self._setup_branching_task(branching_stage="B1", swap_visited_branch=swap_visited_branch, rng=rng)
+
+        elif stage_str == "B3":
+            # Multi-room navigation: traverse into 2nd room, leave remaining rooms unvisited
+            visited_zones = set()
+            path_b3 = []
+            for cell in ordered_cells:
+                z = sim.zone[cell]
+                visited_zones.add(z)
+                if len(visited_zones) >= 2 and dist[cell] >= 8:
+                    curr = cell
+                    while curr is not None:
+                        path_b3.append(curr)
+                        curr = parent[curr]
+                    path_b3.reverse()
+                    break
+
+            if not path_b3:
+                path_b3 = ordered_cells[:min(15, len(ordered_cells))]
+
+            self.branching_junction = path_b3[-1]
+            self.branching_visited_cells = set(path_b3)
+            self.branching_unvisited_cells = set()
+            self.max_steps = 192
+
+            self._replay_trajectory(path_b3)
+
+        else:  # B4
+            # Full procedural building exploration
+            self.branching_junction = start
+            self.branching_visited_cells = {start}
+            self.branching_unvisited_cells = set()
+            self.max_steps = 384
+            self._replay_trajectory([start])
+
+        self._rewarded_rooms = set(self._visited_rooms)
+
     def action_masks(self):
         """Valid actions in Gymnasium action order; True means available."""
         if self.sim is None:
@@ -618,7 +912,7 @@ class RescueEnv(gym.Env):
             for v in self.sim.victims
         )
 
-        if self.task_type == "exploration_only":
+        if self.task_type in ("exploration_only", "branching_exploration"):
             mask[5] = False
         else:
             mask[5] = (
@@ -650,27 +944,8 @@ class RescueEnv(gym.Env):
 
         return mask
 
-    def _get_observation(self):
-        """Retrieve firefighter 0's clean 9-channel local and memory observation."""
-
-        raw = self.sim.observe(
-            agent_id=0,
-            visibility_radius=self.visibility_radius,
-        )
-
+    def _extract_local_grid(self, raw, person):
         side = 2 * self.visibility_radius + 1
-        person = self.sim.agents[0]
-
-        # 9 channels:
-        # Ch 0: Passability North (raw[8] >= 0.5)
-        # Ch 1: Passability East (raw[9] >= 0.5)
-        # Ch 2: Passability South (raw[10] >= 0.5)
-        # Ch 3: Passability West (raw[11] >= 0.5)
-        # Ch 4: Debris / Obstacle (raw[4] > 0)
-        # Ch 5: Explored Mask / Line-of-sight (raw[5] > 0)
-        # Ch 6: Victim (raw[6])
-        # Ch 7: Exit (1.0 if exit portal cell visible)
-        # Ch 8: Agent Position (1.0 at agent local center)
         local_grid = np.zeros((self.NUM_CHANNELS, side, side), dtype=np.float32)
         local_grid[0] = (raw["grid"][8] >= 0.5).astype(np.float32)
         local_grid[1] = (raw["grid"][9] >= 0.5).astype(np.float32)
@@ -695,6 +970,18 @@ class RescueEnv(gym.Env):
                         opening["open"] and not opening.get("blocked") and not (local_grid[4, r, c] > 0)
                     )
                     local_grid[face, r, c] = 1.0 if is_passable else 0.0
+        return local_grid
+
+    def _get_observation(self):
+        """Retrieve firefighter 0's clean 9-channel local and memory observation."""
+
+        raw = self.sim.observe(
+            agent_id=0,
+            visibility_radius=self.visibility_radius,
+        )
+
+        person = self.sim.agents[0]
+        local_grid = self._extract_local_grid(raw, person)
 
         carrying = any(
             v["carried_by"] == 0 and not v["dead"] and not v["rescued"]
@@ -755,8 +1042,8 @@ class RescueEnv(gym.Env):
                 self.fire_suppression_enabled = bool(options["fire_suppression_enabled"])
             if "task_type" in options:
                 tt = str(options["task_type"]).lower()
-                if tt not in ("full", "return", "discovery", "exploration_only"):
-                    raise ValueError(f"Unknown task_type: '{tt}'. Valid: 'full', 'return', 'discovery', 'exploration_only'")
+                if tt not in ("full", "return", "discovery", "exploration_only", "branching_exploration"):
+                    raise ValueError(f"Unknown task_type: '{tt}'. Valid: 'full', 'return', 'discovery', 'exploration_only', 'branching_exploration'")
                 self.task_type = tt
             if "coverage_target" in options:
                 self.coverage_target = float(options["coverage_target"])
@@ -774,7 +1061,7 @@ class RescueEnv(gym.Env):
             episode_rng.integers(0, 2**31 - 1)
         )
 
-        nvictims = 0 if self.task_type == "exploration_only" else 1
+        nvictims = 0 if self.task_type in ("exploration_only", "branching_exploration") else 1
         self.sim = Environment(
             size=4,
             resolution=2,
@@ -791,7 +1078,7 @@ class RescueEnv(gym.Env):
         self.sim.agents = self.sim.agents[:1]
         self.sim.tick(0)
         self.victim_exit_distance = None
-        if self.task_type != "exploration_only":
+        if self.task_type not in ("exploration_only", "branching_exploration"):
             self._place_victims(episode_rng)
 
         self.steps = 0
@@ -861,6 +1148,10 @@ class RescueEnv(gym.Env):
             r_level = options.get("return_level") if (options and "return_level" in options) else getattr(self, "return_level", None)
             r_mode = options.get("return_mode") if (options and "return_mode" in options) else getattr(self, "return_mode", "legacy")
             self._setup_return_task(return_level=r_level, return_mode=r_mode, rng=episode_rng)
+        elif self.task_type == "branching_exploration":
+            b_stage = options.get("branching_stage", getattr(self, "branching_stage", "B1"))
+            swap_b = bool(options.get("swap_visited_branch", False))
+            self._setup_branching_task(branching_stage=b_stage, swap_visited_branch=swap_b, rng=episode_rng)
         elif self.geometry_reveal_fraction > 0.0 or self.reveal_victim:
             # Prefill privileged geometry or victim location if enabled by curriculum
             full_geom = extract_full_building_geometry(self.sim)
@@ -925,6 +1216,16 @@ class RescueEnv(gym.Env):
             "coverage_at_200": None,
             "coverage_at_384": None,
             "exploration_success": False,
+            "branching_stage": getattr(self, "branching_stage", None),
+            "correct_branch_selected": getattr(self, "branching_correct_decision", None),
+            "entered_new_branch": getattr(self, "branching_entered_new_branch", False),
+            "junction_pos": getattr(self, "branching_junction", None),
+            "unvisited_branch_action": getattr(self, "branching_unvisited_action", None),
+            "visited_branch_action": getattr(self, "branching_visited_action", None),
+            "stem_action": getattr(self, "branching_stem_action", None),
+            "junction_exited": False,
+            "time_to_first_new_territory": None,
+            "new_cells_after_step_50": 0,
         }
 
         return observation, info
@@ -1114,12 +1415,14 @@ class RescueEnv(gym.Env):
 
         if self.task_type == "exploration_only":
             terminated = bool(self._exploration_completed)
+        elif self.task_type == "branching_exploration":
+            terminated = False
         else:
             terminated = bool(result["done"])
         truncated = self.steps >= self.max_steps and not terminated
 
         # Base rescue reward.
-        reward = float(result["reward"]) if self.task_type != "exploration_only" else 0.0
+        reward = float(result["reward"]) if self.task_type not in ("exploration_only", "branching_exploration") else 0.0
 
         # Update observation and remembered memory
         observation = self._get_observation()
@@ -1174,6 +1477,52 @@ class RescueEnv(gym.Env):
                     reward = float(shaping)
             else:
                 reward = 0.0
+        elif self.task_type == "branching_exploration":
+            agent_pos = (self.sim.agents[0]["r"], self.sim.agents[0]["c"])
+            if not getattr(self, "branching_decision_made", False) and action in (1, 2, 3, 4):
+                self.branching_decision_made = True
+                if action == getattr(self, "branching_unvisited_action", 0):
+                    self.branching_correct_decision = True
+                else:
+                    self.branching_correct_decision = False
+
+            if agent_pos != getattr(self, "branching_junction", None):
+                self._junction_exited = True
+
+            if (not getattr(self, "branching_entered_new_branch", False)) and (agent_pos in getattr(self, "branching_unvisited_cells", set())):
+                self.branching_entered_new_branch = True
+
+            if len(new_visited) > 0 and getattr(self, "_first_new_territory_step", None) is None:
+                self._first_new_territory_step = self.steps
+
+            if self.steps > 50 and len(new_visited) > 0:
+                self._new_cells_after_step_50 = getattr(self, "_new_cells_after_step_50", 0) + len(new_visited)
+
+            # Branching exploration runs for the full configured step budget (or until all reachable cells explored)
+            if len(self._visited_reachable_cells) >= len(self._reachable_interior_cells):
+                terminated = True
+
+            # Reward shaping during training
+            if self.reward_shaping:
+                shaping = -self.step_penalty
+                if len(new_visited) > 0:
+                    shaping += len(new_visited) * self.unvisited_cell_bonus
+                if getattr(self, "branching_entered_new_branch", False) and not getattr(self, "_branch_entry_rewarded", False):
+                    self._branch_entry_rewarded = True
+                    shaping += self.branch_entry_bonus
+                current_zone = self.sim.zone[agent_pos[0], agent_pos[1]] if (0 <= agent_pos[0] < self.sim.h and 0 <= agent_pos[1] < self.sim.w) else -1
+                if current_zone >= 0 and current_zone not in getattr(self, "_rewarded_rooms", set()):
+                    if not hasattr(self, "_rewarded_rooms"):
+                        self._rewarded_rooms = set()
+                    self._rewarded_rooms.add(current_zone)
+                    shaping += self.unvisited_room_bonus
+                if self._current_wait_streak > 2 and action == 0:
+                    shaping -= self.wait_streak_penalty * (self._current_wait_streak - 2)
+                if is_oscillating:
+                    shaping -= self.oscillation_penalty
+                reward = float(shaping)
+            else:
+                reward = 0.0
         elif self.task_type == "discovery":
             victim_sighted = bool((observation["grid"][6] > 0).any())
             if victim_sighted and not self._discovery_completed:
@@ -1181,7 +1530,7 @@ class RescueEnv(gym.Env):
                 reward += self.discovery_reward
                 terminated = True
 
-        if self.task_type != "exploration_only":
+        if self.task_type not in ("exploration_only", "branching_exploration"):
             if self.reward_shaping:
                 if self.reward_shaper is None:
                     self.reward_shaper = RewardShaper()
@@ -1218,6 +1567,11 @@ class RescueEnv(gym.Env):
             task_success = self._exploration_completed
         elif self.task_type == "discovery":
             task_success = self._discovery_completed
+        elif self.task_type == "branching_exploration":
+            if self.branching_stage in ("B1", "B2"):
+                task_success = bool(self.branching_entered_new_branch)
+            else:
+                task_success = len(self._visited_rooms) >= 2 and len(self._visited_reachable_cells) >= 15
         else:
             task_success = len(result["victims"]) > 0 and (rescued == len(result["victims"]))
 
@@ -1258,6 +1612,16 @@ class RescueEnv(gym.Env):
             "coverage_at_200": self._coverage_at_steps.get(200, observed_coverage if self.steps >= 200 else (observed_coverage if terminated else None)),
             "coverage_at_384": self._coverage_at_steps.get(384, observed_coverage if self.steps >= 384 else (observed_coverage if terminated else None)),
             "exploration_success": self._exploration_completed,
+            "branching_stage": getattr(self, "branching_stage", None),
+            "correct_branch_selected": getattr(self, "branching_correct_decision", None),
+            "entered_new_branch": getattr(self, "branching_entered_new_branch", False),
+            "junction_exited": getattr(self, "_junction_exited", False),
+            "time_to_first_new_territory": getattr(self, "_first_new_territory_step", None),
+            "new_cells_after_step_50": getattr(self, "_new_cells_after_step_50", 0),
+            "branching_junction": getattr(self, "branching_junction", None),
+            "unvisited_branch_action": getattr(self, "branching_unvisited_action", None),
+            "visited_branch_action": getattr(self, "branching_visited_action", None),
+            "stem_action": getattr(self, "branching_stem_action", None),
         }
         if self.task_type == "discovery":
             info["discovery_success"] = self._discovery_completed
@@ -1265,6 +1629,8 @@ class RescueEnv(gym.Env):
             info["return_success"] = len(result["victims"]) > 0 and (rescued == len(result["victims"]))
         elif self.task_type == "exploration_only":
             info["exploration_reward"] = self._total_exploration_reward
+        elif self.task_type == "branching_exploration":
+            info["branching_success"] = task_success
 
         return observation, reward, terminated, truncated, info
 
