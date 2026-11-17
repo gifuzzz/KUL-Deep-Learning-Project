@@ -53,6 +53,7 @@ def test_exploration_rewards_and_capping():
         task_type="exploration_only",
         geometry_mode="edge",
         reward_shaping=True,
+        exploration_reward_mode="phase7_capped",
         max_exploration_reward=1.0,  # small cap for testing
         exploration_cell_bonus=0.05,
         exploration_edge_bonus=0.02,

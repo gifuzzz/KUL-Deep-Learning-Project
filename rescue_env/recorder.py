@@ -44,6 +44,7 @@ MEMORY_CHANNELS = (
     ("Victim", "Known victim presence and category", "#bc6d98"),
     ("Exit", "Exterior door / window exit point", "#36996a"),
     ("Agent Position", "Firefighter location in memory map", "#e27b35"),
+    ("Spatial Visit Memory", "Physical visit tracking / recency decay", "#9b59b6"),
 )
 
 
@@ -502,6 +503,7 @@ class EpisodeRecorder:
             "ever_picked_up": ever_picked_up,
             "carrying_at_end": carrying_states[-1] if carrying_states else False,
             "explored_coverage": coverage_fraction,
+            "visited_coverage": round(len(set(agent_positions)) / max(1, total_interior), 4),
             "oscillation_count": oscillation_count,
             "category": category,
             "category_readable": category.replace("_", " ").title(),
@@ -569,6 +571,7 @@ def record_episode(
     model_path: str | Path | None = None,
     architecture: str = "baseline",
     options: dict[str, Any] | None = None,
+    zero_ablate_ch9: bool = False,
 ) -> EpisodeRecorder:
     """Execute and faithfully record an episode with exact policy-input and output tensors."""
     # Initialize environment first so env.sim is populated
@@ -596,6 +599,9 @@ def record_episode(
     target_device = model.device if hasattr(model, "device") else torch.device("cpu")
 
     while not done:
+        if zero_ablate_ch9 and obs["memory"].shape[0] >= 10:
+            obs["memory"][9, :, :] = 0.0
+
         # 1. Convert current observation into tensor
         obs_tensor, _ = model.policy.obs_to_tensor(obs)
 

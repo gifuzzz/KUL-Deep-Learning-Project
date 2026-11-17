@@ -35,6 +35,7 @@ from agents.cnn import (
     RecurrentSpatialRescueCNN,
     inspect_checkpoint,
     transfer_compatible_weights,
+    transfer_spatial_memory_weights,
 )
 
 

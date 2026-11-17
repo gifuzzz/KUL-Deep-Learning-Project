@@ -1,0 +1,42 @@
+[
+  {
+    "model": "Phase 6 Base",
+    "mask_wait": false,
+    "n_episodes": 50,
+    "mean_observed_coverage": 0.10937272933222708,
+    "mean_visited_coverage": 0.01637645310854735,
+    "mean_wait_fraction": 0.13671875,
+    "mean_oscillation_pct": 52.18229166666667,
+    "mean_length": 384.0
+  },
+  {
+    "model": "Phase 6 Base",
+    "mask_wait": true,
+    "n_episodes": 50,
+    "mean_observed_coverage": 0.10940348330048105,
+    "mean_visited_coverage": 0.016654669482816357,
+    "mean_wait_fraction": 0.0,
+    "mean_oscillation_pct": 60.80729166666667,
+    "mean_length": 384.0
+  },
+  {
+    "model": "Phase 7 Best",
+    "mask_wait": false,
+    "n_episodes": 50,
+    "mean_observed_coverage": 0.11166406409520793,
+    "mean_visited_coverage": 0.014551058542817654,
+    "mean_wait_fraction": 0.4121354166666667,
+    "mean_oscillation_pct": 28.140625000000004,
+    "mean_length": 384.0
+  },
+  {
+    "model": "Phase 7 Best",
+    "mask_wait": true,
+    "n_episodes": 50,
+    "mean_observed_coverage": 0.12259496241246945,
+    "mean_visited_coverage": 0.016784033440289413,
+    "mean_wait_fraction": 0.0,
+    "mean_oscillation_pct": 56.06250000000001,
+    "mean_length": 384.0
+  }
+]

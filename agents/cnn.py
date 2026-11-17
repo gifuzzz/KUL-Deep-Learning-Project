@@ -1037,3 +1037,88 @@ def transfer_compatible_weights(
         "warm_start_source": source_desc,
     }
 
+
+def transfer_spatial_memory_weights(
+    source_model: Any,
+    target_model: Any,
+    zero_init_ch9: bool = True,
+) -> dict[str, Any]:
+    """Transfer weights from a 9-channel checkpoint to a 10-channel spatial-memory model.
+
+    Copies all weights across all layers. For `memory_cnn.0.weight` (which has shape
+    (32, 10, 3, 3) in target vs (32, 9, 3, 3) in source), channels 0..8 are copied
+    directly and channel 9 is strictly zero-initialized.
+
+    This guarantees exact mathematical output equivalence between the 9-channel baseline
+    and the 10-channel transferred model at initialization (Delta < 1e-6).
+    """
+    if isinstance(source_model, (str, Path)):
+        ckpt_info = inspect_checkpoint(source_model)
+        source_state = ckpt_info["state_dict"]
+        source_arch = ckpt_info["architecture_variant"]
+        source_desc = str(source_model)
+    elif hasattr(source_model, "policy"):
+        source_state = source_model.policy.state_dict()
+        source_arch = getattr(source_model.policy, "architecture_variant", "unknown")
+        source_desc = f"Model({source_arch})"
+    elif isinstance(source_model, nn.Module):
+        source_state = source_model.state_dict()
+        source_arch = getattr(source_model, "architecture_variant", "unknown")
+        source_desc = f"Policy({source_arch})"
+    elif isinstance(source_model, dict):
+        source_state = source_model
+        source_arch = "state_dict"
+        source_desc = "state_dict"
+    else:
+        raise TypeError(f"Unsupported source_model type: {type(source_model)}")
+
+    if hasattr(target_model, "policy"):
+        target_policy = target_model.policy
+        target_algo = target_model
+    elif isinstance(target_model, nn.Module):
+        target_policy = target_model
+        target_algo = None
+    else:
+        raise TypeError(f"Unsupported target_model type: {type(target_model)}")
+
+    target_state = target_policy.state_dict()
+    transferred_keys: list[str] = []
+    transferred_params: int = 0
+
+    with torch.no_grad():
+        for key, tgt_tensor in target_state.items():
+            if key not in source_state:
+                continue
+
+            src_tensor = source_state[key]
+            if key == "memory_cnn.0.weight":
+                # Special handling for channel 9 expansion
+                tgt_tensor[:, :9, :, :].copy_(src_tensor[:, :9, :, :].to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                if zero_init_ch9:
+                    tgt_tensor[:, 9:, :, :].zero_()
+                transferred_keys.append(key)
+                transferred_params += src_tensor.numel()
+            elif src_tensor.shape == tgt_tensor.shape:
+                tgt_tensor.copy_(src_tensor.to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                transferred_keys.append(key)
+                transferred_params += src_tensor.numel()
+
+    is_warm = len(transferred_keys) > 0
+    setattr(target_policy, "is_warm_started", is_warm)
+    setattr(target_policy, "warm_start_source", source_desc)
+    setattr(target_policy, "spatial_memory_transferred", True)
+    if target_algo is not None:
+        setattr(target_algo, "is_warm_started", is_warm)
+        setattr(target_algo, "warm_start_source", source_desc)
+        setattr(target_algo, "spatial_memory_transferred", True)
+
+    return {
+        "status": "success" if is_warm else "no_layers_transferred",
+        "source_variant": source_arch,
+        "transferred_keys": transferred_keys,
+        "transferred_params": transferred_params,
+        "zero_init_ch9": zero_init_ch9,
+        "warm_start_source": source_desc,
+    }
+
+

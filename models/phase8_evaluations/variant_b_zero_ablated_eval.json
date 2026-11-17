@@ -1,0 +1,133 @@
+{
+  "model_name": "Variant B (Zero-Ablated Ch9)",
+  "model_path": "models/phase8_binary_visited/stage3_spawn_curriculum/best_model.zip",
+  "spatial_memory_mode": "visited_binary",
+  "zero_ablate_ch9": true,
+  "exploration_benchmark": {
+    "observed_coverage_mean": 12.810853517406661,
+    "visited_coverage_mean": 1.7548286722091668,
+    "edge_coverage_mean": 13.385347365915145,
+    "wait_action_fraction_mean": 47.65104166666667,
+    "oscillation_percentage_mean": 29.130208333333336,
+    "unique_rooms_entered_mean": 1.545,
+    "coverage_at_50_mean": 12.409462047598074,
+    "coverage_at_100_mean": 12.566617154991274,
+    "coverage_at_200_mean": 12.66347322943686,
+    "coverage_at_384_mean": 12.810853517406661,
+    "mean_episode_length": 384.0
+  },
+  "spawn_ladder": {
+    "spawn_2_6": {
+      "rescue_rate": 91.0,
+      "pickup_rate": 96.0,
+      "discovery_rate": 100.0,
+      "return_conditional": 94.79166666666666,
+      "carrier_timeout_rate": 5.0,
+      "mean_successful_length": 9.04945054945055,
+      "oscillation_percentage_mean": 5.271875,
+      "wait_action_fraction_mean": 0.6015625
+    },
+    "spawn_7_12": {
+      "rescue_rate": 17.5,
+      "pickup_rate": 59.5,
+      "discovery_rate": 85.5,
+      "return_conditional": 29.411764705882355,
+      "carrier_timeout_rate": 42.0,
+      "mean_successful_length": 29.228571428571428,
+      "oscillation_percentage_mean": 32.806441812445385,
+      "wait_action_fraction_mean": 25.90064560135701
+    },
+    "spawn_13_20": {
+      "rescue_rate": 10.0,
+      "pickup_rate": 31.0,
+      "discovery_rate": 35.5,
+      "return_conditional": 32.25806451612903,
+      "carrier_timeout_rate": 21.0,
+      "mean_successful_length": 38.3,
+      "oscillation_percentage_mean": 29.767884229740847,
+      "wait_action_fraction_mean": 34.349411231884055
+    },
+    "spawn_21_35": {
+      "rescue_rate": 0.5,
+      "pickup_rate": 14.000000000000002,
+      "discovery_rate": 18.0,
+      "return_conditional": 3.571428571428571,
+      "carrier_timeout_rate": 13.5,
+      "mean_successful_length": 51.0,
+      "oscillation_percentage_mean": 30.793402777777775,
+      "wait_action_fraction_mean": 38.192708333333336
+    },
+    "spawn_distant": {
+      "rescue_rate": 0.0,
+      "pickup_rate": 4.0,
+      "discovery_rate": 7.000000000000001,
+      "return_conditional": 0.0,
+      "carrier_timeout_rate": 4.0,
+      "mean_successful_length": 0.0,
+      "oscillation_percentage_mean": 29.576822916666664,
+      "wait_action_fraction_mean": 40.83854166666667
+    }
+  },
+  "exit_ladder": {
+    "near": {
+      "rescue_rate": 94.5,
+      "pickup_rate": 100.0,
+      "discovery_rate": 100.0,
+      "return_conditional": 94.5,
+      "carrier_timeout_rate": 5.5,
+      "mean_successful_length": 3.8306878306878307,
+      "oscillation_percentage_mean": 5.1171875,
+      "wait_action_fraction_mean": 0.0
+    },
+    "medium": {
+      "rescue_rate": 45.5,
+      "pickup_rate": 51.0,
+      "discovery_rate": 52.0,
+      "return_conditional": 89.2156862745098,
+      "carrier_timeout_rate": 5.5,
+      "mean_successful_length": 13.131868131868131,
+      "oscillation_percentage_mean": 17.883570195083994,
+      "wait_action_fraction_mean": 16.35546875
+    },
+    "bridge_a": {
+      "rescue_rate": 35.0,
+      "pickup_rate": 50.5,
+      "discovery_rate": 60.5,
+      "return_conditional": 69.3069306930693,
+      "carrier_timeout_rate": 15.5,
+      "mean_successful_length": 16.185714285714287,
+      "oscillation_percentage_mean": 22.39320652173913,
+      "wait_action_fraction_mean": 21.009929653679656
+    },
+    "bridge_b": {
+      "rescue_rate": 17.5,
+      "pickup_rate": 42.5,
+      "discovery_rate": 58.5,
+      "return_conditional": 41.17647058823529,
+      "carrier_timeout_rate": 25.0,
+      "mean_successful_length": 29.771428571428572,
+      "oscillation_percentage_mean": 28.453719379847374,
+      "wait_action_fraction_mean": 29.872693670576737
+    },
+    "bridge_c": {
+      "rescue_rate": 12.0,
+      "pickup_rate": 34.0,
+      "discovery_rate": 44.0,
+      "return_conditional": 35.294117647058826,
+      "carrier_timeout_rate": 22.0,
+      "mean_successful_length": 34.125,
+      "oscillation_percentage_mean": 29.141032089975752,
+      "wait_action_fraction_mean": 35.811750490492926
+    },
+    "distant": {
+      "rescue_rate": 0.0,
+      "pickup_rate": 4.0,
+      "discovery_rate": 7.000000000000001,
+      "return_conditional": 0.0,
+      "carrier_timeout_rate": 4.0,
+      "mean_successful_length": 0.0,
+      "oscillation_percentage_mean": 29.576822916666664,
+      "wait_action_fraction_mean": 40.83854166666667
+    }
+  }
+}

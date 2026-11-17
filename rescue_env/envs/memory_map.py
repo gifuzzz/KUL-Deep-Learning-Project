@@ -9,6 +9,8 @@ class MemoryMap:
         channels: int = 9,
         max_height: int = 40,
         max_width: int = 52,
+        spatial_memory_mode: str = "none",
+        recency_tau: float = 40.0,
     ):
         if height > max_height or width > max_width:
             raise ValueError(
@@ -18,7 +20,20 @@ class MemoryMap:
 
         self.height = int(height)
         self.width = int(width)
-        self.channels = int(channels)
+        self.spatial_memory_mode = str(spatial_memory_mode).lower()
+        self.recency_tau = float(recency_tau)
+
+        if self.spatial_memory_mode not in ("none", "visited_binary", "visit_recency"):
+            raise ValueError(
+                f"Unknown spatial_memory_mode: '{spatial_memory_mode}'. "
+                f"Valid: 'none', 'visited_binary', 'visit_recency'"
+            )
+
+        if self.spatial_memory_mode in ("visited_binary", "visit_recency"):
+            self.channels = max(10, int(channels))
+        else:
+            self.channels = int(channels)
+
         self.max_height = int(max_height)
         self.max_width = int(max_width)
 
@@ -28,7 +43,7 @@ class MemoryMap:
         self.reset()
 
     def reset(self):
-        # Channels 0..8 stored for the building footprint (height, width)
+        # Channels 0..8 (or 0..9) stored for the building footprint (height, width)
         self.grid = np.zeros(
             (self.channels, self.height, self.width),
             dtype=np.float32,
@@ -39,6 +54,18 @@ class MemoryMap:
             (self.height, self.width),
             dtype=np.float32,
         )
+
+        # Physical visit tracking
+        self.visited = np.zeros(
+            (self.height, self.width),
+            dtype=np.float32,
+        )
+        self.last_visit_step = np.full(
+            (self.height, self.width),
+            -1.0,
+            dtype=np.float32,
+        )
+        self.current_step = 0
 
         self.last_agent_position = None
 
@@ -68,9 +95,16 @@ class MemoryMap:
             if 0 <= vr < self.height and 0 <= vc < self.width:
                 self.grid[6, vr, vc] = 1.0
 
-    def update(self, local_grid, agent_position):
+    def update(self, local_grid, agent_position, step_idx=None):
+        if step_idx is not None:
+            self.current_step = int(step_idx)
         self.last_agent_position = agent_position
         agent_r, agent_c = agent_position
+
+        # Track physical visits (visited_binary and visit_recency)
+        if 0 <= agent_r < self.height and 0 <= agent_c < self.width:
+            self.visited[agent_r, agent_c] = 1.0
+            self.last_visit_step[agent_r, agent_c] = float(self.current_step)
 
         radius_r = local_grid.shape[1] // 2
         radius_c = local_grid.shape[2] // 2
@@ -104,7 +138,7 @@ class MemoryMap:
                         dest[vis_mask] = sub_local[ch][vis_mask]
                     self.explored[r_min_global:r_max_global, c_min_global:c_max_global][vis_mask] = 1.0
 
-    def get_observation(self, agent_position=None):
+    def get_observation(self, agent_position=None, step_idx=None):
         padded = np.zeros(
             (self.channels, self.max_height, self.max_width),
             dtype=np.float32,
@@ -124,5 +158,21 @@ class MemoryMap:
             ar, ac = pos
             if 0 <= ar < self.height and 0 <= ac < self.width:
                 padded[8, pad_top + ar, pad_left + ac] = 1.0
+
+        # Channel 9: Spatial Memory (Visited Binary or Recency)
+        if self.channels >= 10 and self.spatial_memory_mode != "none":
+            if self.spatial_memory_mode == "visited_binary":
+                padded[9, pad_top : pad_top + self.height, pad_left : pad_left + self.width] = self.visited
+            elif self.spatial_memory_mode == "visit_recency":
+                t = float(step_idx if step_idx is not None else self.current_step)
+                recency = np.zeros((self.height, self.width), dtype=np.float32)
+                visited_mask = self.last_visit_step >= 0.0
+                if np.any(visited_mask):
+                    dt = np.maximum(0.0, t - self.last_visit_step[visited_mask])
+                    recency[visited_mask] = np.exp(-dt / max(1e-5, self.recency_tau))
+                # Current cell is guaranteed 1.0
+                if pos is not None and 0 <= pos[0] < self.height and 0 <= pos[1] < self.width:
+                    recency[pos[0], pos[1]] = 1.0
+                padded[9, pad_top : pad_top + self.height, pad_left : pad_left + self.width] = recency
 
         return padded

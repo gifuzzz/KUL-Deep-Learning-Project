@@ -124,7 +124,9 @@ class RescueEnv(gym.Env):
                  fire_suppression_enabled=False,
                  coverage_target=0.90, exploration_cell_bonus=0.05,
                  exploration_edge_bonus=0.02, max_exploration_reward=6.0,
-                 exploration_step_penalty=0.001, oscillation_penalty=0.02):
+                 exploration_step_penalty=0.001, oscillation_penalty=0.02,
+                 spatial_memory_mode="none", recency_tau=40.0,
+                 exploration_reward_mode="normalized_continuous"):
         super().__init__()
 
         self.max_steps = max_steps
@@ -168,6 +170,26 @@ class RescueEnv(gym.Env):
         self.exploration_step_penalty = float(exploration_step_penalty)
         self.oscillation_penalty = float(oscillation_penalty)
 
+        self.spatial_memory_mode = str(spatial_memory_mode).lower()
+        if self.spatial_memory_mode not in ("none", "visited_binary", "visit_recency"):
+            raise ValueError(
+                f"Unknown spatial_memory_mode: '{spatial_memory_mode}'. "
+                f"Valid: 'none', 'visited_binary', 'visit_recency'"
+            )
+        self.recency_tau = float(recency_tau)
+
+        self.exploration_reward_mode = str(exploration_reward_mode).lower()
+        if self.exploration_reward_mode not in ("normalized_continuous", "phase7_capped"):
+            raise ValueError(
+                f"Unknown exploration_reward_mode: '{exploration_reward_mode}'. "
+                f"Valid: 'normalized_continuous', 'phase7_capped'"
+            )
+
+        self.memory_channels = (
+            10 if self.spatial_memory_mode in ("visited_binary", "visit_recency")
+            else self.NUM_CHANNELS
+        )
+
         self.fixed_seed = fixed_seed
         self.min_victim_distance = min_victim_distance
         self.memory = None
@@ -208,7 +230,7 @@ class RescueEnv(gym.Env):
             "memory": spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(self.NUM_CHANNELS, self.max_height, self.max_width),
+                shape=(self.memory_channels, self.max_height, self.max_width),
                 dtype=np.float32,
             ),
             "agent": spaces.Box(
@@ -685,10 +707,12 @@ class RescueEnv(gym.Env):
         self.memory.update(
             local_grid=local_grid,
             agent_position=(person["r"], person["c"]),
+            step_idx=self.steps,
         )
 
         memory = self.memory.get_observation(
             agent_position=(person["r"], person["c"]),
+            step_idx=self.steps,
         )
 
         return {
@@ -789,15 +813,27 @@ class RescueEnv(gym.Env):
                 self.return_mode = str(options["return_mode"]).lower()
             if "return_level" in options:
                 self.return_level = str(options["return_level"]).upper()
+            if "spatial_memory_mode" in options:
+                self.spatial_memory_mode = str(options["spatial_memory_mode"]).lower()
+                self.memory_channels = (
+                    10 if self.spatial_memory_mode in ("visited_binary", "visit_recency")
+                    else self.NUM_CHANNELS
+                )
+            if "recency_tau" in options:
+                self.recency_tau = float(options["recency_tau"])
+            if "exploration_reward_mode" in options:
+                self.exploration_reward_mode = str(options["exploration_reward_mode"]).lower()
 
         self._discovery_completed = False
 
         self.memory = MemoryMap(
             height=self.sim.h,
             width=self.sim.w,
-            channels=self.NUM_CHANNELS,
+            channels=self.memory_channels,
             max_height=self.max_height,
             max_width=self.max_width,
+            spatial_memory_mode=self.spatial_memory_mode,
+            recency_tau=self.recency_tau,
         )
 
         self._compute_reachable_graph()
@@ -986,11 +1022,13 @@ class RescueEnv(gym.Env):
             self._zone_history.pop(0)
 
         # Visited cells and rooms
+        newly_visited_cells = []
         if agent_pos in self._reachable_interior_cells:
             if agent_pos in self._visited_reachable_cells:
                 self._revisit_count += 1
             else:
                 self._visited_reachable_cells.add(agent_pos)
+                newly_visited_cells.append(agent_pos)
         if current_zone >= 0:
             self._visited_rooms.add(current_zone)
 
@@ -1029,7 +1067,7 @@ class RescueEnv(gym.Env):
                     self._discovered_edges.add(edge)
                     newly_discovered_edges.append(edge)
 
-        return newly_observed_cells, newly_discovered_edges, is_oscillating
+        return newly_observed_cells, newly_discovered_edges, is_oscillating, newly_visited_cells
 
     def step(self, action):
         """Execute one action in the simulation."""
@@ -1087,7 +1125,7 @@ class RescueEnv(gym.Env):
         observation = self._get_observation()
         newly_uncovered = max(0, int(self.memory.explored.sum() - explored_before))
 
-        new_cells, new_edges, is_oscillating = self._update_exploration_tracking()
+        new_cells, new_edges, is_oscillating, new_visited = self._update_exploration_tracking()
 
         denom_cells = len(self._reachable_interior_cells) if self._reachable_interior_cells else 1
         denom_edges = len(self._reachable_traversable_edges) if self._reachable_traversable_edges else 1
@@ -1106,21 +1144,34 @@ class RescueEnv(gym.Env):
                 truncated = False
 
             if self.reward_shaping:
-                shaping = -self.exploration_step_penalty
-                pos_potential = (
-                    len(new_cells) * self.exploration_cell_bonus
-                    + len(new_edges) * self.exploration_edge_bonus
-                )
-                if pos_potential > 0.0 and self._total_exploration_reward < self.max_exploration_reward:
-                    actual_pos = min(
-                        pos_potential,
-                        self.max_exploration_reward - self._total_exploration_reward,
+                if self.exploration_reward_mode == "normalized_continuous":
+                    shaping = -self.exploration_step_penalty
+                    pos_potential = (
+                        (len(new_cells) / denom_cells) * 8.0
+                        + (len(new_edges) / denom_edges) * 4.0
+                        + (len(new_visited) / denom_cells) * 4.0
                     )
-                    self._total_exploration_reward += actual_pos
-                    shaping += actual_pos
-                if is_oscillating:
-                    shaping -= self.oscillation_penalty
-                reward = float(shaping)
+                    shaping += pos_potential
+                    self._total_exploration_reward += pos_potential
+                    if is_oscillating:
+                        shaping -= self.oscillation_penalty
+                    reward = float(shaping)
+                else:  # "phase7_capped"
+                    shaping = -self.exploration_step_penalty
+                    pos_potential = (
+                        len(new_cells) * self.exploration_cell_bonus
+                        + len(new_edges) * self.exploration_edge_bonus
+                    )
+                    if pos_potential > 0.0 and self._total_exploration_reward < self.max_exploration_reward:
+                        actual_pos = min(
+                            pos_potential,
+                            self.max_exploration_reward - self._total_exploration_reward,
+                        )
+                        self._total_exploration_reward += actual_pos
+                        shaping += actual_pos
+                    if is_oscillating:
+                        shaping -= self.oscillation_penalty
+                    reward = float(shaping)
             else:
                 reward = 0.0
         elif self.task_type == "discovery":

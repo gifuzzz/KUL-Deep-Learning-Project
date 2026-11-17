@@ -23,6 +23,7 @@ const MEMORY_CHANNEL_NAMES = [
   "Ch 6: Known Victim",
   "Ch 7: Known Exit",
   "Ch 8: Agent Position",
+  "Ch 9: Spatial Visit Memory",
 ];
 
 // App State
@@ -704,6 +705,8 @@ function renderAgentView() {
   const H = tensor[0].length;
   const W = tensor[0][0].length;
 
+  channelDimsBadge.textContent = `${C} × ${H} × ${W}`;
+
   const cellW = canvasW / W;
   const cellH = canvasH / H;
   const cellSize = Math.min(cellW, cellH);
@@ -743,6 +746,13 @@ function renderAgentView() {
 
         agentCtx.fillStyle = bg;
         agentCtx.fillRect(x, y, cellSize, cellSize);
+
+        // Visited memory tint (Ch 9, if present in memory view)
+        const visitMem = tensor[9] ? tensor[9][r][c] : 0;
+        if (visitMem > 0 && activeViewMode === "memory") {
+          agentCtx.fillStyle = `rgba(245, 158, 11, ${Math.min(0.35, 0.12 + visitMem * 0.23)})`;
+          agentCtx.fillRect(x + 1, y + 1, cellSize - 2, cellSize - 2);
+        }
 
         // Grid lines
         agentCtx.strokeStyle = "#1a2536";
@@ -816,9 +826,21 @@ function renderAgentView() {
         const y = offsetY + r * cellSize;
 
         // Color based on value 0.0 -> 1.0
-        const brightness = Math.round(val * 220);
-        agentCtx.fillStyle = `rgb(${brightness}, ${Math.round(brightness * 0.7)}, ${Math.round(brightness * 0.9)})`;
-        if (val === 0) agentCtx.fillStyle = "#0c121c";
+        if (chIdx === 9) {
+          if (val === 0) {
+            agentCtx.fillStyle = "#0c121c";
+          } else {
+            // Warm amber/gold heatmap for visit memory
+            const rC = Math.round(40 + val * 215);
+            const gC = Math.round(val * 190);
+            const bC = Math.round((1.0 - val) * 140 + val * 40);
+            agentCtx.fillStyle = `rgb(${rC}, ${gC}, ${bC})`;
+          }
+        } else {
+          const brightness = Math.round(val * 220);
+          agentCtx.fillStyle = `rgb(${brightness}, ${Math.round(brightness * 0.7)}, ${Math.round(brightness * 0.9)})`;
+          if (val === 0) agentCtx.fillStyle = "#0c121c";
+        }
         agentCtx.fillRect(x, y, cellSize, cellSize);
 
         agentCtx.strokeStyle = "#1b2738";

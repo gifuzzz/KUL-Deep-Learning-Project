@@ -34,6 +34,7 @@ from agents.cnn import (
     RecurrentSpatialRescueCNN,
     inspect_checkpoint,
     transfer_compatible_weights,
+    transfer_spatial_memory_weights,
 )
 from agents.recurrent_ppo import (
     MaskableRecurrentPPO,
@@ -665,6 +666,9 @@ def make_single_train_env(
     seed: int | None = None,
     geometry_mode: str = "edge",
     distance_metric: str = "exit",
+    spatial_memory_mode: str = "none",
+    recency_tau: float = 40.0,
+    exploration_reward_mode: str = "normalized_continuous",
 ):
     """Factory creating an individual monitored environment."""
 
@@ -683,6 +687,9 @@ def make_single_train_env(
             return_mode=return_mode,
             geometry_mode=geometry_mode,
             distance_metric=distance_metric,
+            spatial_memory_mode=spatial_memory_mode,
+            recency_tau=recency_tau,
+            exploration_reward_mode=exploration_reward_mode,
         )
         env = PreviousActionWrapper(env)
         if seed is not None:
@@ -708,6 +715,9 @@ def make_train_env(
     base_seed: int = 42,
     geometry_mode: str = "edge",
     distance_metric: str = "exit",
+    spatial_memory_mode: str = "none",
+    recency_tau: float = 40.0,
+    exploration_reward_mode: str = "normalized_continuous",
 ) -> DummyVecEnv | Monitor:
     """Create vectorized or single monitored training environment."""
     if normalize_stage(stage) == "2C" and substage == "2A":
@@ -730,6 +740,9 @@ def make_train_env(
             return_mode=return_mode,
             geometry_mode=geometry_mode,
             distance_metric=distance_metric,
+            spatial_memory_mode=spatial_memory_mode,
+            recency_tau=recency_tau,
+            exploration_reward_mode=exploration_reward_mode,
         )
         env = PreviousActionWrapper(env)
         return Monitor(env, info_keywords=("success", "timeout", "task_type", "observed_coverage", "visited_coverage", "unique_rooms_entered", "doorway_reversals"))
@@ -750,6 +763,9 @@ def make_train_env(
             seed=base_seed + i * 1000,
             geometry_mode=geometry_mode,
             distance_metric=distance_metric,
+            spatial_memory_mode=spatial_memory_mode,
+            recency_tau=recency_tau,
+            exploration_reward_mode=exploration_reward_mode,
         )
         for i in range(n_envs)
     ]
@@ -762,6 +778,8 @@ def make_eval_env(
     min_victim_distance: int = 1,
     distance_metric: str = "exit",
     geometry_mode: str = "edge",
+    spatial_memory_mode: str = "none",
+    recency_tau: float = 40.0,
 ) -> PreviousActionWrapper:
     """Unshaped evaluation environment (+10 native rescue only)."""
     env = RescueEnv(
@@ -772,6 +790,8 @@ def make_eval_env(
         navigation_shaping=False,
         distance_metric=distance_metric,
         geometry_mode=geometry_mode,
+        spatial_memory_mode=spatial_memory_mode,
+        recency_tau=recency_tau,
     )
     return PreviousActionWrapper(env)
 
@@ -1713,6 +1733,30 @@ def parse_args():
         default="edge",
         help="Geometry mode: 'edge' (native edge-conductance walls) or 'legacy_cell' (398 full-cell wall blocks)",
     )
+    parser.add_argument(
+        "--spatial-memory-mode",
+        choices=["none", "visited_binary", "visit_recency"],
+        default="none",
+        help="Spatial visit memory mode in channel 9: none, visited_binary, visit_recency (default: none)",
+    )
+    parser.add_argument(
+        "--recency-tau",
+        type=float,
+        default=40.0,
+        help="Decay constant tau for visit_recency mode in steps (default: 40.0)",
+    )
+    parser.add_argument(
+        "--exploration-reward-mode",
+        choices=["normalized_continuous", "phase7_capped"],
+        default="normalized_continuous",
+        help="Exploration reward mode: normalized_continuous (Phase 8 uncapped) or phase7_capped (Phase 7 +6.0 cap) (default: normalized_continuous)",
+    )
+    parser.add_argument(
+        "--transfer-from",
+        type=str,
+        default=None,
+        help="Source checkpoint path to transfer weights from (e.g. 9-channel base into 10-channel spatial-memory model)",
+    )
     return parser.parse_args()
 
 
@@ -1833,10 +1877,40 @@ def main():
         base_seed=args.seed,
         geometry_mode=args.geometry_mode,
         distance_metric=dist_metric,
+        spatial_memory_mode=args.spatial_memory_mode,
+        recency_tau=args.recency_tau,
+        exploration_reward_mode=args.exploration_reward_mode,
     )
-    eval_env = make_eval_env(victim_distance=2, max_steps=64, distance_metric=dist_metric, geometry_mode=args.geometry_mode)
+    eval_env = make_eval_env(
+        victim_distance=2,
+        max_steps=64,
+        distance_metric=dist_metric,
+        geometry_mode=args.geometry_mode,
+        spatial_memory_mode=args.spatial_memory_mode,
+        recency_tau=args.recency_tau,
+    )
 
-    if args.checkpoint:
+    if args.transfer_from:
+        print(f"Initializing model for spatial memory transfer from: {args.transfer_from}")
+        model = MaskableRecurrentPPO(
+            policy=RecurrentSpatialRescueCNN,
+            env=train_env,
+            architecture_variant=args.architecture,
+            learning_rate=args.learning_rate,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
+            ent_coef=args.ent_coef,
+            target_kl=args.target_kl,
+            verbose=1,
+            device=device,
+            tensorboard_log="./logs/",
+            seed=args.seed,
+        )
+        transfer_summary = transfer_spatial_memory_weights(args.transfer_from, model, zero_init_ch9=True)
+        print("Spatial memory transfer summary:", transfer_summary)
+    elif args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")
         model = load_checkpoint(args.checkpoint, env=train_env, device=device, expected_architecture=args.architecture)
         if args.learning_rate is not None:
@@ -2049,11 +2123,11 @@ def main():
             stage3_dir = save_dir / "stage3_spawn_curriculum"
             stage3_dir.mkdir(parents=True, exist_ok=True)
 
-            eval_env_stage2 = make_eval_env(victim_distance=None, max_steps=384, distance_metric="spawn", geometry_mode=args.geometry_mode)
-            eval_env_near = make_eval_env(victim_distance=6, min_victim_distance=2, max_steps=64, distance_metric="spawn", geometry_mode=args.geometry_mode)
-            eval_env_med = make_eval_env(victim_distance=12, min_victim_distance=7, max_steps=128, distance_metric="spawn", geometry_mode=args.geometry_mode)
-            eval_env_bridge_a = make_eval_env(victim_distance=20, min_victim_distance=13, max_steps=192, distance_metric="spawn", geometry_mode=args.geometry_mode)
-            eval_env_bridge_b = make_eval_env(victim_distance=35, min_victim_distance=21, max_steps=288, distance_metric="spawn", geometry_mode=args.geometry_mode)
+            eval_env_stage2 = make_eval_env(victim_distance=None, max_steps=384, distance_metric="spawn", geometry_mode=args.geometry_mode, spatial_memory_mode=args.spatial_memory_mode, recency_tau=args.recency_tau)
+            eval_env_near = make_eval_env(victim_distance=6, min_victim_distance=2, max_steps=64, distance_metric="spawn", geometry_mode=args.geometry_mode, spatial_memory_mode=args.spatial_memory_mode, recency_tau=args.recency_tau)
+            eval_env_med = make_eval_env(victim_distance=12, min_victim_distance=7, max_steps=128, distance_metric="spawn", geometry_mode=args.geometry_mode, spatial_memory_mode=args.spatial_memory_mode, recency_tau=args.recency_tau)
+            eval_env_bridge_a = make_eval_env(victim_distance=20, min_victim_distance=13, max_steps=192, distance_metric="spawn", geometry_mode=args.geometry_mode, spatial_memory_mode=args.spatial_memory_mode, recency_tau=args.recency_tau)
+            eval_env_bridge_b = make_eval_env(victim_distance=35, min_victim_distance=21, max_steps=288, distance_metric="spawn", geometry_mode=args.geometry_mode, spatial_memory_mode=args.spatial_memory_mode, recency_tau=args.recency_tau)
             eval_env_bridge_c = None
 
             callback3 = RecurrentMaskableEvalCallback(
