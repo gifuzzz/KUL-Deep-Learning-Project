@@ -106,6 +106,7 @@ class RewardShaper:
     - First victim pickup: +1.5 per victim
     - Frontier exploration: +0.05 per newly uncovered cell in memory_map (capped at +3.0 per episode)
     - Anti-oscillation penalty: -0.02 on repeating 2-cell limit cycles (A <-> B <-> A <-> B) while exploring
+    - Repeated Wait penalty (optional): configurable penalty schedule on consecutive Wait actions
     """
 
     def __init__(
@@ -115,31 +116,60 @@ class RewardShaper:
         exploration_bonus: float = 0.05,
         max_exploration_reward: float = 3.0,
         oscillation_penalty: float = 0.02,
+        repeated_wait_penalty_enabled: bool = False,
+        wait_penalty_schedule: tuple[float, ...] = (0.0, 0.002, 0.004, 0.008),
     ):
         self.step_penalty = float(step_penalty)
         self.pickup_reward = float(pickup_reward)
         self.exploration_bonus = float(exploration_bonus)
         self.max_exploration_reward = float(max_exploration_reward)
         self.oscillation_penalty = float(oscillation_penalty)
+        self.repeated_wait_penalty_enabled = bool(repeated_wait_penalty_enabled)
+        self.wait_penalty_schedule = tuple(float(x) for x in wait_penalty_schedule)
         self.rewarded_pickups = set()
         self.total_exploration_reward = 0.0
         self.recent_positions: list[tuple[int, int]] = []
+        self.consecutive_waits = 0
+        self.last_breakdown = {}
 
     def reset(self):
         self.rewarded_pickups.clear()
         self.total_exploration_reward = 0.0
         self.recent_positions.clear()
+        self.consecutive_waits = 0
+        self.last_breakdown = {}
 
     def compute_reward(
         self,
         victims,
         newly_uncovered_cells: int = 0,
         current_position: tuple[int, int] | None = None,
+        action: int | None = None,
     ) -> float:
         shaping = 0.0
+        breakdown = {
+            "step_penalty": 0.0,
+            "pickup_reward": 0.0,
+            "exploration_bonus": 0.0,
+            "oscillation_penalty": 0.0,
+            "repeated_wait_penalty": 0.0,
+            "total_shaping": 0.0,
+        }
 
         # Step penalty
         shaping -= self.step_penalty
+        breakdown["step_penalty"] = -self.step_penalty
+
+        # Repeated Wait penalty schedule
+        if self.repeated_wait_penalty_enabled and action is not None:
+            if action == 0:
+                self.consecutive_waits += 1
+                idx = min(self.consecutive_waits - 1, len(self.wait_penalty_schedule) - 1)
+                penalty = self.wait_penalty_schedule[idx]
+                shaping -= penalty
+                breakdown["repeated_wait_penalty"] = -penalty
+            else:
+                self.consecutive_waits = 0
 
         # First victim pickup
         picked_up = {
@@ -150,7 +180,9 @@ class RewardShaper:
         first_pickups = picked_up - self.rewarded_pickups
         if first_pickups:
             self.rewarded_pickups.update(first_pickups)
-            shaping += self.pickup_reward * len(first_pickups)
+            p_bonus = self.pickup_reward * len(first_pickups)
+            shaping += p_bonus
+            breakdown["pickup_reward"] = p_bonus
 
         # Frontier exploration reward (+0.05/cell, capped at +3.0/episode)
         is_carrying = any(v["carried_by"] == 0 for v in victims)
@@ -160,6 +192,7 @@ class RewardShaper:
             actual_bonus = min(bonus, remaining)
             self.total_exploration_reward += actual_bonus
             shaping += actual_bonus
+            breakdown["exploration_bonus"] = actual_bonus
 
         # Anti-oscillation penalty: discourage 2-cell limit cycles (A <-> B <-> A <-> B)
         if not is_carrying and current_position is not None:
@@ -169,7 +202,11 @@ class RewardShaper:
             if len(self.recent_positions) == 4:
                 p0, p1, p2, p3 = self.recent_positions
                 if p3 == p1 and p2 == p0 and p3 != p2:
-                    shaping -= self.oscillation_penalty
+                    if self.oscillation_penalty > 0.0:
+                        shaping -= self.oscillation_penalty
+                        breakdown["oscillation_penalty"] = -self.oscillation_penalty
 
+        breakdown["total_shaping"] = float(shaping)
+        self.last_breakdown = breakdown
         return float(shaping)
 

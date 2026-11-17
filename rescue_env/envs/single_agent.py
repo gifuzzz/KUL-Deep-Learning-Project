@@ -125,6 +125,8 @@ class RescueEnv(gym.Env):
                  coverage_target=0.90, exploration_cell_bonus=0.05,
                  exploration_edge_bonus=0.02, max_exploration_reward=6.0,
                  exploration_step_penalty=0.001, oscillation_penalty=0.02,
+                 repeated_wait_penalty_enabled=False,
+                 wait_penalty_schedule=(0.0, 0.002, 0.004, 0.008),
                  spatial_memory_mode="none", recency_tau=40.0,
                  exploration_reward_mode="normalized_continuous"):
         super().__init__()
@@ -139,7 +141,16 @@ class RescueEnv(gym.Env):
         self.return_level = str(return_level).upper() if return_level is not None else None
         self.current_return_level = None
         self.current_return_mode = self.return_mode
-        self.reward_shaper = RewardShaper() if reward_shaping else None
+        self.oscillation_penalty = float(oscillation_penalty)
+        self.repeated_wait_penalty_enabled = bool(repeated_wait_penalty_enabled)
+        self.wait_penalty_schedule = tuple(float(x) for x in wait_penalty_schedule)
+        self.step_penalty = float(exploration_step_penalty)
+        self.reward_shaper = RewardShaper(
+            step_penalty=self.step_penalty,
+            oscillation_penalty=self.oscillation_penalty,
+            repeated_wait_penalty_enabled=self.repeated_wait_penalty_enabled,
+            wait_penalty_schedule=self.wait_penalty_schedule,
+        ) if reward_shaping else None
         if not np.isfinite(exploration_bonus) or exploration_bonus < 0:
             raise ValueError("exploration_bonus must be finite and nonnegative")
         self.exploration_bonus = exploration_bonus
@@ -1055,6 +1066,10 @@ class RescueEnv(gym.Env):
                 self.exploration_edge_bonus = float(options["exploration_edge_bonus"])
             if "max_steps" in options:
                 self.max_steps = int(options["max_steps"])
+            if "victim_distance" in options:
+                self.victim_distance = options["victim_distance"]
+            if "min_victim_distance" in options:
+                self.min_victim_distance = options["min_victim_distance"]
 
         # Generate a reproducible episode seed
         episode_seed = int(
@@ -1533,11 +1548,17 @@ class RescueEnv(gym.Env):
         if self.task_type not in ("exploration_only", "branching_exploration"):
             if self.reward_shaping:
                 if self.reward_shaper is None:
-                    self.reward_shaper = RewardShaper()
+                    self.reward_shaper = RewardShaper(
+                        step_penalty=self.step_penalty,
+                        oscillation_penalty=self.oscillation_penalty,
+                        repeated_wait_penalty_enabled=self.repeated_wait_penalty_enabled,
+                        wait_penalty_schedule=self.wait_penalty_schedule,
+                    )
                 reward += self.reward_shaper.compute_reward(
                     result["victims"],
                     newly_uncovered_cells=newly_uncovered,
                     current_position=(self.sim.agents[0]["r"], self.sim.agents[0]["c"]),
+                    action=int_action,
                 )
 
             # New optional navigation reward.
@@ -1631,6 +1652,22 @@ class RescueEnv(gym.Env):
             info["exploration_reward"] = self._total_exploration_reward
         elif self.task_type == "branching_exploration":
             info["branching_success"] = task_success
+
+        # Reward breakdown
+        if self.reward_shaping and self.reward_shaper is not None:
+            breakdown = self.reward_shaper.last_breakdown.copy()
+        else:
+            breakdown = {
+                "step_penalty": 0.0,
+                "pickup_reward": 0.0,
+                "exploration_bonus": 0.0,
+                "oscillation_penalty": 0.0,
+                "repeated_wait_penalty": 0.0,
+                "total_shaping": 0.0,
+            }
+        breakdown["native_rescue"] = float(result["reward"]) if self.task_type not in ("exploration_only", "branching_exploration") else 0.0
+        breakdown["total_reward"] = float(reward)
+        info["reward_breakdown"] = breakdown
 
         return observation, reward, terminated, truncated, info
 
