@@ -1,0 +1,238 @@
+{
+  "weights_progression": {
+    "Variant B (Binary Visited)": {
+      "Step 0 (init)": {
+        "checkpoint": "initial_transferred.zip",
+        "norm": 0.0,
+        "mean_abs": 0.0,
+        "max_abs": 0.0,
+        "std": 0.0,
+        "nonzero_count": 0,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.051630973815918,
+        "ratio_to_pretrained_norm_pct": 0.0
+      },
+      "Step 10k": {
+        "checkpoint": "stage3_spawn_curriculum/checkpoint_10000.zip",
+        "norm": 0.11131361871957779,
+        "mean_abs": 0.004461228381842375,
+        "max_abs": 0.023055773228406906,
+        "std": 0.006479447707533836,
+        "nonzero_count": 222,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.0477070808410645,
+        "ratio_to_pretrained_norm_pct": 3.65237261216255
+      },
+      "Step 25k": {
+        "checkpoint": "stage3_spawn_curriculum/checkpoint_25000.zip",
+        "norm": 0.13714496791362762,
+        "mean_abs": 0.0054296404123306274,
+        "max_abs": 0.028429362922906876,
+        "std": 0.0077993376180529594,
+        "nonzero_count": 226,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.046396493911743,
+        "ratio_to_pretrained_norm_pct": 4.501875188857174
+      },
+      "Best Model": {
+        "checkpoint": "stage3_spawn_curriculum/best_model.zip",
+        "norm": 0.09139680117368698,
+        "mean_abs": 0.0035807262174785137,
+        "max_abs": 0.018897496163845062,
+        "std": 0.00537918321788311,
+        "nonzero_count": 217,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.0497775077819824,
+        "ratio_to_pretrained_norm_pct": 2.9968350458508466
+      },
+      "Step 50k (final)": {
+        "checkpoint": "final_model.zip",
+        "norm": 0.14906856417655945,
+        "mean_abs": 0.006042386405169964,
+        "max_abs": 0.03351243957877159,
+        "std": 0.008300382643938065,
+        "nonzero_count": 226,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.0476438999176025,
+        "ratio_to_pretrained_norm_pct": 4.891272375377902
+      }
+    },
+    "Variant C (Visit Recency)": {
+      "Step 0 (init)": {
+        "checkpoint": "initial_transferred.zip",
+        "norm": 0.0,
+        "mean_abs": 0.0,
+        "max_abs": 0.0,
+        "std": 0.0,
+        "nonzero_count": 0,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.051630973815918,
+        "ratio_to_pretrained_norm_pct": 0.0
+      },
+      "Step 10k": {
+        "checkpoint": "stage3_spawn_curriculum/checkpoint_10000.zip",
+        "norm": 0.12179271876811981,
+        "mean_abs": 0.0049935607239604,
+        "max_abs": 0.029117401689291,
+        "std": 0.007074706256389618,
+        "nonzero_count": 226,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.052686929702759,
+        "ratio_to_pretrained_norm_pct": 3.989689135268739
+      },
+      "Step 25k": {
+        "checkpoint": "stage3_spawn_curriculum/checkpoint_25000.zip",
+        "norm": 0.1493922770023346,
+        "mean_abs": 0.006004797760397196,
+        "max_abs": 0.035478826612234116,
+        "std": 0.008763279765844345,
+        "nonzero_count": 231,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.0546464920043945,
+        "ratio_to_pretrained_norm_pct": 4.890656820465878
+      },
+      "Best Model": {
+        "checkpoint": "stage3_spawn_curriculum/best_model.zip",
+        "norm": 0.08059652149677277,
+        "mean_abs": 0.0032392211724072695,
+        "max_abs": 0.018030337989330292,
+        "std": 0.00468116719275713,
+        "nonzero_count": 221,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.052027940750122,
+        "ratio_to_pretrained_norm_pct": 2.6407530684979212
+      },
+      "Step 50k (final)": {
+        "checkpoint": "final_model.zip",
+        "norm": 0.17548760771751404,
+        "mean_abs": 0.007091850973665714,
+        "max_abs": 0.03564223647117615,
+        "std": 0.010276373475790024,
+        "nonzero_count": 234,
+        "total_weights": 288,
+        "pretrained_mean_norm": 3.054682731628418,
+        "ratio_to_pretrained_norm_pct": 5.744871829093802
+      }
+    }
+  },
+  "optimizer_moments": {
+    "Variant B (Binary Visited)": {
+      "Step 10k": {
+        "opt_step": 1216.0,
+        "exp_avg_norm": 0.0022274961229413748,
+        "exp_avg_sq_norm": 1.4410613403015304e-05,
+        "exp_avg_sq_mean": 2.1088170854000055e-07,
+        "exp_avg_sq_max": 5.359119313652627e-06,
+        "rms_grad": 0.00019938309560529888,
+        "nonzero_params": 222,
+        "total_params": 288,
+        "pretrained_v_mean": 1.6695749991413322e-06
+      },
+      "Step 25k": {
+        "opt_step": 2496.0,
+        "exp_avg_norm": 0.0009086120408028364,
+        "exp_avg_sq_norm": 1.3916946954850573e-05,
+        "exp_avg_sq_mean": 1.849216602067827e-07,
+        "exp_avg_sq_max": 5.305572358338395e-06,
+        "rms_grad": 0.00017556552484165877,
+        "nonzero_params": 226,
+        "total_params": 288,
+        "pretrained_v_mean": 1.7439606381230988e-06
+      },
+      "Best Model": {
+        "opt_step": 576.0,
+        "exp_avg_norm": 0.0038512968458235264,
+        "exp_avg_sq_norm": 9.483690519118682e-06,
+        "exp_avg_sq_mean": 1.4398676739801886e-07,
+        "exp_avg_sq_max": 3.473985543678282e-06,
+        "rms_grad": 0.00016979653446469456,
+        "nonzero_params": 217,
+        "total_params": 288,
+        "pretrained_v_mean": 1.0352293884352548e-06
+      },
+      "Step 50k (final)": {
+        "opt_step": 3136.0,
+        "exp_avg_norm": 0.005054744426161051,
+        "exp_avg_sq_norm": 1.3414639397524297e-05,
+        "exp_avg_sq_mean": 1.7261592688555538e-07,
+        "exp_avg_sq_max": 5.471597887662938e-06,
+        "rms_grad": 0.00016866459918674082,
+        "nonzero_params": 226,
+        "total_params": 288,
+        "pretrained_v_mean": 1.5275030591510586e-06
+      }
+    },
+    "Variant C (Visit Recency)": {
+      "Step 10k": {
+        "opt_step": 1216.0,
+        "exp_avg_norm": 0.0003376099339220673,
+        "exp_avg_sq_norm": 1.5928973198242602e-06,
+        "exp_avg_sq_mean": 2.5253598323615734e-08,
+        "exp_avg_sq_max": 6.849629130556423e-07,
+        "rms_grad": 8.22665388113819e-05,
+        "nonzero_params": 226,
+        "total_params": 288,
+        "pretrained_v_mean": 1.234032197316992e-06
+      },
+      "Step 25k": {
+        "opt_step": 2496.0,
+        "exp_avg_norm": 0.0005954321823082864,
+        "exp_avg_sq_norm": 2.713828052947065e-06,
+        "exp_avg_sq_mean": 3.725865482806512e-08,
+        "exp_avg_sq_max": 1.1295475133010768e-06,
+        "rms_grad": 8.801799413049594e-05,
+        "nonzero_params": 231,
+        "total_params": 288,
+        "pretrained_v_mean": 2.047286670858739e-06
+      },
+      "Best Model": {
+        "opt_step": 576.0,
+        "exp_avg_norm": 0.0003915645647794008,
+        "exp_avg_sq_norm": 9.7396434739494e-07,
+        "exp_avg_sq_mean": 1.5856880253295458e-08,
+        "exp_avg_sq_max": 4.085831051270361e-07,
+        "rms_grad": 6.371005292749032e-05,
+        "nonzero_params": 221,
+        "total_params": 288,
+        "pretrained_v_mean": 7.740649721199588e-07
+      },
+      "Step 50k (final)": {
+        "opt_step": 3136.0,
+        "exp_avg_norm": 0.0005367739358916879,
+        "exp_avg_sq_norm": 2.517914026611834e-06,
+        "exp_avg_sq_mean": 3.3935020127273674e-08,
+        "exp_avg_sq_max": 9.909741720548482e-07,
+        "rms_grad": 8.195487316697836e-05,
+        "nonzero_params": 234,
+        "total_params": 288,
+        "pretrained_v_mean": 2.0936161035933765e-06
+      }
+    }
+  },
+  "active_gradients": {
+    "grad_norm_9": 0.06171856075525284,
+    "grad_mean_abs_9": 0.0011315145529806614,
+    "grad_max_abs_9": 0.03127552941441536,
+    "nonzero_grads_count": 56,
+    "total_grads_count": 288,
+    "grad_norm_pretrained_mean": 1.116319179534912
+  },
+  "logit_sensitivity": {
+    "n_states_evaluated": 30,
+    "zero_ablation": {
+      "mean_max_logit_delta": 0.0023419539133707683,
+      "peak_max_logit_delta": 0.009005069732666016,
+      "mean_value_delta": 0.0016770124435424804,
+      "peak_value_delta": 0.011756658554077148
+    },
+    "realistic_visit_addition": {
+      "mean_max_logit_delta": 0.006031632423400879,
+      "peak_max_logit_delta": 0.01786327362060547,
+      "mean_total_variation_prob_delta": 0.0008052064261088768,
+      "peak_total_variation_prob_delta": 0.00296134315431118,
+      "mean_value_delta": 0.003559066851933797,
+      "peak_value_delta": 0.01748967170715332,
+      "mean_directional_relative_shift": 0.0009760936101277669
+    }
+  }
+}
