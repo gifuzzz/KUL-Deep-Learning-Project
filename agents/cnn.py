@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 from gymnasium import spaces
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -228,12 +229,13 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         if lr_schedule is None:
             lr_schedule = lambda _: 3e-4
 
-        if architecture_variant not in ("baseline", "deep128", "deep256"):
+        valid_variants = ("baseline", "current", "deep128", "deep256", "memory_only", "memory_crop")
+        if architecture_variant not in valid_variants:
             raise ValueError(
                 f"Unknown architecture_variant: '{architecture_variant}'. "
-                f"Must be one of ['baseline', 'deep128', 'deep256']"
+                f"Must be one of {list(valid_variants)}"
             )
-        self.architecture_variant = str(architecture_variant)
+        self.architecture_variant = "baseline" if str(architecture_variant) == "current" else str(architecture_variant)
 
         if isinstance(observation_space, spaces.Dict):
             space_dict = dict(observation_space.spaces)
@@ -300,15 +302,19 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
             action_dim = self.action_space.n
 
         # Local Branch: Unpooled SpatialRescueCNN head
-        self.local_cnn = nn.Sequential(
-            nn.Conv2d(local_channels, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 8, kernel_size=1),
-            nn.Flatten(),
-        )
-        self.local_features_dim = 8 * local_h * local_w
+        if self.architecture_variant == "memory_only":
+            self.local_cnn = None
+            self.local_features_dim = 0
+        else:
+            self.local_cnn = nn.Sequential(
+                nn.Conv2d(local_channels, 32, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(64, 8, kernel_size=1),
+                nn.Flatten(),
+            )
+            self.local_features_dim = 8 * local_h * local_w
 
         # Memory Branch: ZERO MaxPool2d
         self.memory_cnn = nn.Sequential(
@@ -333,11 +339,11 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         )
 
         # Fusion Branch based on architecture_variant:
-        if self.architecture_variant == "baseline":
-            # Variant A: Direct linear compression without non-linear depth
+        if self.architecture_variant in ("baseline", "memory_only", "memory_crop"):
+            # Variant A / B / C: Direct linear compression without non-linear depth
             self.fusion = nn.Linear(total_fusion_dim, self.hidden_size)
         elif self.architecture_variant == "deep128":
-            # Variant B: 2-stage projection with LayerNorm and ReLU
+            # 2-stage projection with LayerNorm and ReLU
             self.fusion = nn.Sequential(
                 nn.Linear(total_fusion_dim, 256),
                 nn.LayerNorm(256),
@@ -346,7 +352,7 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
                 nn.ReLU(),
             )
         elif self.architecture_variant == "deep256":
-            # Variant C: 2-stage 512->256 projection with LayerNorm and ReLU
+            # 2-stage 512->256 projection with LayerNorm and ReLU
             self.fusion = nn.Sequential(
                 nn.Linear(total_fusion_dim, 512),
                 nn.LayerNorm(512),
@@ -372,7 +378,7 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         self.action_dist = make_masked_proba_distribution(self.action_space)
 
         # Output heads based on architecture_variant:
-        if self.architecture_variant in ("baseline", "deep128"):
+        if self.architecture_variant in ("baseline", "deep128", "memory_only", "memory_crop"):
             self.action_net = nn.Linear(self.hidden_size, self.action_dim)
             self.value_net = nn.Linear(self.hidden_size, 1)
         elif self.architecture_variant == "deep256":
@@ -396,7 +402,8 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
                 self.fusion: np.sqrt(2),
             }
             for module, gain in module_gains.items():
-                module.apply(partial(self.init_weights, gain=gain))
+                if module is not None:
+                    module.apply(partial(self.init_weights, gain=gain))
 
             if isinstance(self.action_net, nn.Sequential):
                 self.action_net[0].apply(partial(self.init_weights, gain=np.sqrt(2)))
@@ -478,6 +485,33 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         zeros = torch.zeros_like(h)
         return RNNStates(pi=(h, zeros), vf=(h, zeros))
 
+    def _extract_memory_crop(self, memory: torch.Tensor, crop_radius: int = 7) -> torch.Tensor:
+        """Extracts an agent-centered (B, C, 15, 15) crop from memory (B, C, H, W)."""
+        B, C, H, W = memory.shape
+        device = memory.device
+
+        if C > 8:
+            agent_ch = memory[:, 8]
+            flat_idx = agent_ch.view(B, -1).argmax(dim=-1)
+            agent_r = (flat_idx // W).float()
+            agent_c = (flat_idx % W).float()
+        else:
+            agent_r = torch.full((B,), H / 2.0, device=device)
+            agent_c = torch.full((B,), W / 2.0, device=device)
+
+        dr = torch.arange(-crop_radius, crop_radius + 1, dtype=torch.float32, device=device)
+        dc = torch.arange(-crop_radius, crop_radius + 1, dtype=torch.float32, device=device)
+        grid_r, grid_c = torch.meshgrid(dr, dc, indexing="ij")
+
+        sample_r = agent_r.view(-1, 1, 1) + grid_r.unsqueeze(0)
+        sample_c = agent_c.view(-1, 1, 1) + grid_c.unsqueeze(0)
+
+        norm_y = 2.0 * sample_r / max(1.0, float(H - 1)) - 1.0
+        norm_x = 2.0 * sample_c / max(1.0, float(W - 1)) - 1.0
+        grid = torch.stack([norm_x, norm_y], dim=-1)
+
+        return F.grid_sample(memory, grid, mode="nearest", padding_mode="zeros", align_corners=True)
+
     def _forward_network(
         self,
         obs: dict[str, torch.Tensor] | torch.Tensor,
@@ -487,23 +521,39 @@ class RecurrentSpatialRescueCNN(RecurrentActorCriticPolicy):
         if not isinstance(obs, dict):
             raise TypeError(f"RecurrentSpatialRescueCNN expects observation dict, got {type(obs)}")
 
-        grid = obs["grid"]
+        grid = obs.get("grid", None)
         memory = obs["memory"]
         agent = obs["agent"]
         prev_action = obs.get("previous_action", None)
 
-        batch_size = grid.shape[0]
-        device = grid.device
+        batch_size = memory.shape[0]
+        device = memory.device
 
-        local_features = self.local_cnn(grid)
         memory_features = self.memory_cnn(memory)
         agent_features = agent.view(batch_size, -1)
         prev_action_features = self._encode_previous_action(prev_action, batch_size, device)
 
-        combined = torch.cat(
-            [local_features, memory_features, agent_features, prev_action_features],
-            dim=-1,
-        )
+        if self.architecture_variant == "memory_only":
+            combined = torch.cat(
+                [memory_features, agent_features, prev_action_features],
+                dim=-1,
+            )
+        elif self.architecture_variant == "memory_crop":
+            local_crop = self._extract_memory_crop(memory)
+            local_features = self.local_cnn(local_crop)
+            combined = torch.cat(
+                [local_features, memory_features, agent_features, prev_action_features],
+                dim=-1,
+            )
+        else:
+            if grid is None:
+                raise ValueError(f"Observation dict missing 'grid' required for {self.architecture_variant}")
+            local_features = self.local_cnn(grid)
+            combined = torch.cat(
+                [local_features, memory_features, agent_features, prev_action_features],
+                dim=-1,
+            )
+
         fused = self.fusion(combined)
 
         # Determine sequence shape:
@@ -899,7 +949,10 @@ def inspect_checkpoint(path: str | Path) -> dict[str, Any]:
             elif f0_shape[0] == 256:
                 arch = "deep128"
         elif "fusion.weight" in state_dict:
-            arch = "baseline"
+            if state_dict["fusion.weight"].shape[1] == 8332:
+                arch = "memory_only"
+            else:
+                arch = "baseline"
 
     if arch is None:
         arch = "baseline"
@@ -1120,5 +1173,108 @@ def transfer_spatial_memory_weights(
         "zero_init_ch9": zero_init_ch9,
         "warm_start_source": source_desc,
     }
+
+
+def transfer_phase11_weights(
+    source_model: Any,
+    target_model: Any,
+) -> dict[str, Any]:
+    """Transfer compatible weights from a Phase 10 checkpoint to Phase 11 variants:
+    - Variant A ('baseline' / 'current'): 100% parameter transfer (1,431,168 params).
+    - Variant B ('memory_only'): 100% parameter transfer into target (1,179,128 params).
+      Memory CNN, GRU, policy/value heads transfer directly.
+      Fusion weights slice memory features [1800:10120] -> [0:8320]
+      and agent/previous_action features [10120:10132] -> [8320:8332].
+    - Variant C ('memory_crop'): 100% parameter transfer (1,431,168 params).
+      Local CNN processes memory crop instead of raw raycast view.
+
+    Returns dict detailing transferred layers, parameters, and status.
+    """
+    if isinstance(source_model, (str, Path)):
+        ckpt_info = inspect_checkpoint(source_model)
+        source_state = ckpt_info["state_dict"]
+        source_arch = ckpt_info["architecture_variant"]
+        source_desc = str(source_model)
+    elif hasattr(source_model, "policy"):
+        source_state = source_model.policy.state_dict()
+        source_arch = getattr(source_model.policy, "architecture_variant", "unknown")
+        source_desc = f"Model({source_arch})"
+    elif isinstance(source_model, nn.Module):
+        source_state = source_model.state_dict()
+        source_arch = getattr(source_model, "architecture_variant", "unknown")
+        source_desc = f"Policy({source_arch})"
+    elif isinstance(source_model, dict):
+        source_state = source_model
+        source_arch = "state_dict"
+        source_desc = "state_dict"
+    else:
+        raise TypeError(f"Unsupported source_model type: {type(source_model)}")
+
+    if hasattr(target_model, "policy"):
+        target_policy = target_model.policy
+        target_algo = target_model
+    elif isinstance(target_model, nn.Module):
+        target_policy = target_model
+        target_algo = None
+    else:
+        raise TypeError(f"Unsupported target_model type: {type(target_model)}")
+
+    target_arch = getattr(target_policy, "architecture_variant", "unknown")
+    target_state = target_policy.state_dict()
+    transferred_keys: list[str] = []
+    transferred_params: int = 0
+    alias_prefixes = ("lstm_actor.", "policy_head.", "value_head.")
+
+    with torch.no_grad():
+        if target_arch == "memory_only":
+            for key, tgt_tensor in target_state.items():
+                if key == "fusion.weight" and "fusion.weight" in source_state:
+                    src_w = source_state["fusion.weight"]
+                    # memory columns: 1800:10120 -> 0:8320
+                    tgt_tensor[:, :8320].copy_(src_w[:, 1800:10120].to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                    # agent + prev_action columns: 10120:10132 -> 8320:8332
+                    tgt_tensor[:, 8320:8332].copy_(src_w[:, 10120:10132].to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                    transferred_keys.append(key)
+                    if not any(key.startswith(pfx) for pfx in alias_prefixes):
+                        transferred_params += tgt_tensor.numel()
+                elif key in source_state and source_state[key].shape == tgt_tensor.shape:
+                    tgt_tensor.copy_(source_state[key].to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                    transferred_keys.append(key)
+                    if not any(key.startswith(pfx) for pfx in alias_prefixes):
+                        transferred_params += tgt_tensor.numel()
+        else:
+            for key, tgt_tensor in target_state.items():
+                if key in source_state and source_state[key].shape == tgt_tensor.shape:
+                    tgt_tensor.copy_(source_state[key].to(device=tgt_tensor.device, dtype=tgt_tensor.dtype))
+                    transferred_keys.append(key)
+                    if not any(key.startswith(pfx) for pfx in alias_prefixes):
+                        transferred_params += tgt_tensor.numel()
+
+    is_warm = len(transferred_keys) > 0
+    setattr(target_policy, "is_warm_started", is_warm)
+    setattr(target_policy, "warm_start_source", source_desc)
+    setattr(target_policy, "phase11_transferred", True)
+    if target_algo is not None:
+        setattr(target_algo, "is_warm_started", is_warm)
+        setattr(target_algo, "warm_start_source", source_desc)
+        setattr(target_algo, "phase11_transferred", True)
+
+    total_target_unique = sum(
+        p.numel()
+        for k, p in target_state.items()
+        if not any(k.startswith(pfx) for pfx in alias_prefixes)
+    )
+
+    return {
+        "status": "success" if is_warm else "no_layers_transferred",
+        "source_variant": source_arch,
+        "target_variant": target_arch,
+        "transferred_keys": transferred_keys,
+        "transferred_params": transferred_params,
+        "total_target_params": total_target_unique,
+        "transfer_coverage_pct": 100.0 * transferred_params / max(1, total_target_unique),
+        "warm_start_source": source_desc,
+    }
+
 
 

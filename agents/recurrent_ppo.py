@@ -668,7 +668,9 @@ def load_checkpoint(
     ckpt_arch = ckpt_info["architecture_variant"]
 
     # Checkpoint Guard: Fail explicitly on architecture mismatch
-    if expected_arch is not None and expected_arch != ckpt_arch:
+    norm_expected = "baseline" if expected_arch == "current" else expected_arch
+    norm_ckpt = "baseline" if ckpt_arch == "current" else ckpt_arch
+    if norm_expected is not None and norm_expected != norm_ckpt:
         raise ValueError(
             f"Checkpoint architecture mismatch for '{path}':\n"
             f"  Checkpoint was saved with architecture : '{ckpt_arch}'\n"
@@ -677,7 +679,7 @@ def load_checkpoint(
             f"To transfer compatible feature extractor weights instead, call transfer_compatible_weights()."
         )
 
-    target_arch = expected_arch or ckpt_arch
+    target_arch = norm_expected or norm_ckpt
 
     # Determine device
     if device == "auto":

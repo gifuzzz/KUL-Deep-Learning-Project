@@ -35,6 +35,7 @@ from agents.cnn import (
     inspect_checkpoint,
     transfer_compatible_weights,
     transfer_spatial_memory_weights,
+    transfer_phase11_weights,
 )
 from agents.recurrent_ppo import (
     MaskableRecurrentPPO,
@@ -1550,10 +1551,10 @@ def parse_args():
     parser.add_argument(
         "--architecture",
         "--arch",
-        choices=["baseline", "deep128", "deep256"],
+        choices=["baseline", "current", "deep128", "deep256", "memory_only", "memory_crop"],
         default="baseline",
         dest="architecture",
-        help="Neural network architecture variant: baseline, deep128, or deep256 (default: baseline)",
+        help="Neural network architecture variant: baseline, current, deep128, deep256, memory_only, memory_crop (default: baseline)",
     )
     parser.add_argument(
         "--stage",
@@ -1891,11 +1892,12 @@ def main():
     )
 
     if args.transfer_from:
-        print(f"Initializing model for spatial memory transfer from: {args.transfer_from}")
+        arch_norm = "baseline" if args.architecture == "current" else args.architecture
+        print(f"Initializing model for weight transfer from: {args.transfer_from} (target arch: {arch_norm})")
         model = MaskableRecurrentPPO(
             policy=RecurrentSpatialRescueCNN,
             env=train_env,
-            architecture_variant=args.architecture,
+            architecture_variant=arch_norm,
             learning_rate=args.learning_rate,
             n_steps=args.n_steps,
             batch_size=args.batch_size,
@@ -1908,8 +1910,12 @@ def main():
             tensorboard_log="./logs/",
             seed=args.seed,
         )
-        transfer_summary = transfer_spatial_memory_weights(args.transfer_from, model, zero_init_ch9=True)
-        print("Spatial memory transfer summary:", transfer_summary)
+        if args.spatial_memory_mode in ("visited_binary", "visit_recency"):
+            transfer_summary = transfer_spatial_memory_weights(args.transfer_from, model, zero_init_ch9=True)
+            print("Spatial memory transfer summary:", transfer_summary)
+        else:
+            transfer_summary = transfer_phase11_weights(args.transfer_from, model)
+            print("Phase 11 transfer summary:", transfer_summary)
     elif args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")
         model = load_checkpoint(args.checkpoint, env=train_env, device=device, expected_architecture=args.architecture)
